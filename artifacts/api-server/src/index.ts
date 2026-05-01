@@ -15,7 +15,7 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
+const server = app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
@@ -23,3 +23,7 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 });
+
+// Allow model generation requests up to 600 seconds
+server.setTimeout(600_000);
+server.keepAliveTimeout = 600_000;
