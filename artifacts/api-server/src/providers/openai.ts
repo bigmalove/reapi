@@ -47,8 +47,26 @@ export async function callOpenAI(
   const isOSeries = /^o\d/.test(baseModel);
   const isReasoningModel = REASONING_MODELS.has(baseModel) || isOSeries;
 
-  // Reasoning models don't support max_tokens or temperature/top_p
-  const { max_tokens, temperature, top_p, ...restRequest } = request;
+  // Reasoning models don't support: max_tokens, temperature, top_p,
+  // presence_penalty, frequency_penalty, logit_bias, logprobs, top_logprobs
+  const {
+    max_tokens,
+    temperature,
+    top_p,
+    presence_penalty,
+    frequency_penalty,
+    logit_bias,
+    logprobs,
+    top_logprobs,
+    ...restRequest
+  } = request as ChatCompletionRequest & {
+    presence_penalty?: number;
+    frequency_penalty?: number;
+    logit_bias?: Record<string, number>;
+    logprobs?: boolean;
+    top_logprobs?: number;
+  };
+
   const resolvedRequest: Record<string, unknown> = {
     ...restRequest,
     model: baseModel,
@@ -58,6 +76,11 @@ export async function callOpenAI(
           ...(max_tokens !== undefined ? { max_tokens } : {}),
           ...(temperature !== undefined ? { temperature } : {}),
           ...(top_p !== undefined ? { top_p } : {}),
+          ...(presence_penalty !== undefined ? { presence_penalty } : {}),
+          ...(frequency_penalty !== undefined ? { frequency_penalty } : {}),
+          ...(logit_bias !== undefined ? { logit_bias } : {}),
+          ...(logprobs !== undefined ? { logprobs } : {}),
+          ...(top_logprobs !== undefined ? { top_logprobs } : {}),
         }),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   };
