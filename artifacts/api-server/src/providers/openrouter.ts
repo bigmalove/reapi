@@ -85,6 +85,10 @@ export async function callOpenRouter(
     };
   }
 
+  // NOTE: Replit AI Integration proxy strips the `provider` routing field for
+  // OpenRouter requests, so we cannot pin DeepSeek V4 to the official source.
+  // OpenRouter will auto-select a provider by its default routing rules.
+
   const maxTokens = (request.max_tokens as number | undefined) ?? 16000;
 
   function budgetToEffort(budget: number): string {

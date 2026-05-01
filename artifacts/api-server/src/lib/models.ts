@@ -109,6 +109,8 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "x-ai/grok-4-fast",                 provider: "openrouter", created: 1748995200 },
   { id: "meta-llama/llama-4-maverick",       provider: "openrouter", created: 1744934400 },
   { id: "meta-llama/llama-4-scout",          provider: "openrouter", created: 1744934400 },
+  { id: "deepseek/deepseek-v4-pro",          provider: "openrouter", created: 1759276800 },
+  { id: "deepseek/deepseek-v4-flash",        provider: "openrouter", created: 1759276800 },
   { id: "deepseek/deepseek-v3.2",            provider: "openrouter", created: 1751328000 },
   { id: "deepseek/deepseek-r1",              provider: "openrouter", created: 1737158400 },
   { id: "deepseek/deepseek-r1-0528",         provider: "openrouter", created: 1748995200 },
