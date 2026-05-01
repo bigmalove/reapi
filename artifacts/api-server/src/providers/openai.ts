@@ -15,9 +15,12 @@ export async function callOpenAI(
 
   // Strip -thinking suffix from o-series aliases (they reason by default)
   const resolvedModel = request.model.replace(/-thinking$/, "");
-  const isOSeries = /^o\d/.test(resolvedModel);
 
-  // o-series models don't support max_tokens or temperature; use max_completion_tokens instead
+  // Models that use max_completion_tokens instead of max_tokens and strip temperature/top_p
+  const REASONING_MODELS = new Set(["gpt-5.5", "gpt-5.5-pro"]);
+  const isOSeries = /^o\d/.test(resolvedModel) || REASONING_MODELS.has(resolvedModel);
+
+  // o-series / reasoning models don't support max_tokens or temperature; use max_completion_tokens instead
   const { max_tokens, temperature, top_p, ...restRequest } = request;
   const resolvedRequest: Record<string, unknown> = {
     ...restRequest,
