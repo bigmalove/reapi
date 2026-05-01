@@ -52,10 +52,29 @@ Optional:
 
 ## Model Routing
 
-- `gpt-*`, `o1-*`, `o3-*`, `o4-*` → OpenAI (via Replit AI Integrations)
+- `gpt-*`, `o1-*`, `o3-*`, `o4-*` → OpenAI (via Replit AI Integrations, backed by Azure)
 - `claude-*` → Anthropic (via Replit AI Integrations)
 - `gemini-*` → Google Gemini (via Replit AI Integrations)
 - `provider/model` format (e.g. `meta-llama/llama-3.3-70b-instruct`) → OpenRouter (via Replit AI Integrations)
+
+### Reasoning models / thinking levels
+
+OpenAI reasoning models (`gpt-5.5`, `o*`, and OpenRouter `openai/gpt-5.5*`) accept thinking-level suffixes that map to `reasoning_effort`:
+- `-thinking-low` → `low`
+- `-thinking-medium` → `medium`
+- `-thinking-high` → `high`
+- `-thinking-xhigh` → `xhigh` (OpenAI's true highest)
+- `-thinking-max` → `xhigh` (alias for highest)
+
+Provider also strips unsupported params (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`) and converts `max_tokens` → `max_completion_tokens` for reasoning models.
+
+### OpenRouter provider pinning
+
+The Replit AI Integration proxy passes through the `provider` field for some sources but strips it for others:
+- ✅ Works: `OpenAI`, `amazon-bedrock` (US-based providers)
+- ❌ Stripped: `deepseek` (CN-based provider) — DeepSeek V4 entries fall back to OpenRouter's auto-routing (Novita / GMICloud / Together / etc.)
+
+`openai/gpt-5.5*` entries are pinned to OpenAI (not Azure) via `provider.order: ["OpenAI"]`.
 
 Default model: `gpt-4.1-mini`
 

@@ -64,6 +64,9 @@ export async function callOpenRouter(
 
   const isClaude = isClaudeModel(actualModel);
 
+  // OpenAI reasoning models on OpenRouter (gpt-5.x, gpt-5.x-pro, o-series)
+  const isOpenAIReasoningModel = /^openai\/(gpt-5(\.\d+)?(-pro|-mini|-nano)?|o\d[\w-]*)$/.test(actualModel);
+
   // Models using adaptive thinking API (effort-based) via OpenRouter/Bedrock
   // actualModel is the resolved OpenRouter model ID (after Bedrock alias lookup)
   const ADAPTIVE_THINKING_MODELS = new Set([
@@ -85,9 +88,43 @@ export async function callOpenRouter(
     };
   }
 
+  // Force OpenAI (not Azure) for OpenAI reasoning models routed via OpenRouter
+  if (isOpenAIReasoningModel) {
+    body["provider"] = {
+      order: ["OpenAI"],
+      allow_fallbacks: false,
+    };
+
+    // OpenAI reasoning models reject these params
+    delete body["temperature"];
+    delete body["top_p"];
+    delete body["presence_penalty"];
+    delete body["frequency_penalty"];
+    delete body["logit_bias"];
+    delete body["logprobs"];
+    delete body["top_logprobs"];
+
+    // OpenAI uses max_completion_tokens (not max_tokens) for reasoning models
+    if (body["max_tokens"] !== undefined) {
+      body["max_completion_tokens"] = body["max_tokens"];
+      delete body["max_tokens"];
+    }
+
+    // Apply reasoning_effort from -thinking-{level} suffix
+    if (thinkingEnabled) {
+      const EFFORT_MAP_OAI: Record<string, string> = {
+        low:    "low",
+        medium: "medium",
+        high:   "high",
+        xhigh:  "xhigh",
+        max:    "xhigh",
+      };
+      body["reasoning_effort"] = explicitEffort ? (EFFORT_MAP_OAI[explicitEffort] ?? "high") : "high";
+    }
+  }
+
   // NOTE: Replit AI Integration proxy strips the `provider` routing field for
-  // OpenRouter requests, so we cannot pin DeepSeek V4 to the official source.
-  // OpenRouter will auto-select a provider by its default routing rules.
+  // some providers (e.g. DeepSeek). OpenAI/Bedrock routing has been observed to work.
 
   const maxTokens = (request.max_tokens as number | undefined) ?? 16000;
 
@@ -122,7 +159,8 @@ export async function callOpenRouter(
     const effort = explicitEffort ?? budgetToEffort(budgetTokens);
     body["thinking"] = { type: "adaptive", display: "summarized" };
     body["output_config"] = { effort };
-  } else if (thinkingEnabled) {
+  } else if (thinkingEnabled && !isOpenAIReasoningModel) {
+    // Anthropic-style budget_tokens thinking (skip for OpenAI — already handled above)
     const budgetTokens = explicitEffort
       ? effortToTokens(explicitEffort, maxTokens)
       : Math.floor(maxTokens * 0.8);
