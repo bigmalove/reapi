@@ -1,3 +1,4 @@
+import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -184,12 +185,7 @@ function getGeminiModelName(model: string): string {
 export async function callGemini(
   request: ChatCompletionRequest,
 ): Promise<ChatCompletionResponse | AsyncIterable<StreamChunk>> {
-  const baseUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
-  const apiKey = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"];
-
-  if (!baseUrl || !apiKey) {
-    throw new Error("Replit AI Integration for Gemini is not configured. AI_INTEGRATIONS_GEMINI_BASE_URL and AI_INTEGRATIONS_GEMINI_API_KEY must be set.");
-  }
+  const { baseUrl, apiKey } = resolveProviderEndpoint("gemini");
 
   const usingIntegration = true;
 

@@ -1,4 +1,5 @@
 import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from "../types.js";
+import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 
 // Models that behave like reasoning models (use max_completion_tokens, no temperature/top_p)
 const REASONING_MODELS = new Set(["gpt-5.5"]);
@@ -30,12 +31,7 @@ function parseThinkingLevel(model: string): { baseModel: string; reasoningEffort
 export async function callOpenAI(
   request: ChatCompletionRequest,
 ): Promise<ChatCompletionResponse | AsyncIterable<StreamChunk>> {
-  const baseUrl = process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"];
-  const apiKey = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"];
-
-  if (!baseUrl || !apiKey) {
-    throw new Error("Replit AI Integration for OpenAI is not configured. AI_INTEGRATIONS_OPENAI_BASE_URL and AI_INTEGRATIONS_OPENAI_API_KEY must be set.");
-  }
+  const { baseUrl, apiKey } = resolveProviderEndpoint("openai");
 
   // Replit integration proxy doesn't include /v1 in path
   const url = `${baseUrl}/chat/completions`;

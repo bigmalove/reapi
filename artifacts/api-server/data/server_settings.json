@@ -1,3 +1,6 @@
 {
-  "sillyTavernMode": true
+  "sillyTavernMode": true,
+  "reverseProxyEnabled": false,
+  "reverseProxyUrl": "",
+  "reverseProxyApiKey": ""
 }

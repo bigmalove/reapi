@@ -1,4 +1,5 @@
 import { logger } from "../lib/logger.js";
+import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -176,12 +177,7 @@ interface AnthropicApiResponse {
 export async function callAnthropic(
   request: ChatCompletionRequest,
 ): Promise<ChatCompletionResponse | AsyncIterable<StreamChunk>> {
-  const baseUrl = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"];
-  const apiKey = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"];
-
-  if (!baseUrl || !apiKey) {
-    throw new Error("Replit AI Integration for Anthropic is not configured. AI_INTEGRATIONS_ANTHROPIC_BASE_URL and AI_INTEGRATIONS_ANTHROPIC_API_KEY must be set.");
-  }
+  const { baseUrl, apiKey } = resolveProviderEndpoint("anthropic");
 
   // Resolve thinking variants and optional effort-level suffix
   const EFFORT_LEVELS = ["max", "xhigh", "high", "medium", "low"] as const;

@@ -22,6 +22,13 @@ export default function ConfigPage() {
   const [saved, setSaved] = useState(false);
   const [loadErr, setLoadErr] = useState("");
 
+  // Reverse-proxy form state
+  const [rpUrl, setRpUrl] = useState("");
+  const [rpKey, setRpKey] = useState("");
+  const [rpSaving, setRpSaving] = useState(false);
+  const [rpSaved, setRpSaved] = useState(false);
+  const [rpErr, setRpErr] = useState("");
+
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   useEffect(() => {
@@ -29,9 +36,52 @@ export default function ConfigPage() {
       .then(([s, cfg]) => {
         setStatus(s);
         setSettings(cfg);
+        setRpUrl(cfg.reverseProxyUrl ?? "");
+        setRpKey(cfg.reverseProxyApiKey ?? "");
       })
       .catch((e) => setLoadErr(String(e)));
   }, []);
+
+  async function toggleReverseProxy() {
+    if (!settings) return;
+    setRpSaving(true);
+    setRpErr("");
+    try {
+      const updated = await updateSettings({ reverseProxyEnabled: !settings.reverseProxyEnabled });
+      setSettings(updated);
+      const s = await fetchSetupStatus();
+      setStatus(s);
+    } catch (e) {
+      setRpErr(String(e));
+    } finally {
+      setRpSaving(false);
+    }
+  }
+
+  async function saveReverseProxyEndpoint() {
+    setRpSaving(true);
+    setRpErr("");
+    try {
+      const url = rpUrl.trim().replace(/\/+$/, "");
+      if (url && !/^https?:\/\//i.test(url)) {
+        throw new Error("URL must start with http:// or https://");
+      }
+      const updated = await updateSettings({
+        reverseProxyUrl: url,
+        reverseProxyApiKey: rpKey,
+      });
+      setSettings(updated);
+      setRpUrl(updated.reverseProxyUrl);
+      const s = await fetchSetupStatus();
+      setStatus(s);
+      setRpSaved(true);
+      setTimeout(() => setRpSaved(false), 2000);
+    } catch (e) {
+      setRpErr(String(e));
+    } finally {
+      setRpSaving(false);
+    }
+  }
 
   function saveApiKey() {
     if (apiKey.trim()) {
@@ -117,12 +167,92 @@ export default function ConfigPage() {
         </p>
       </div>
 
+      {/* Reverse Proxy / Upstream Forwarding */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">Upstream Reverse Proxy</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Forward all 4 providers to a remote upstream gateway's{" "}
+              <code className="bg-secondary/60 px-1 rounded">/modelfarm/&#123;openai,anthropic,google,openrouter&#125;</code> endpoints
+              instead of using this Repl's local Replit AI Integration keys. Useful for piggybacking on a central Repl.
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={settings?.reverseProxyEnabled ?? false}
+            disabled={rpSaving || !settings}
+            onClick={toggleReverseProxy}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background disabled:opacity-50 ${
+              settings?.reverseProxyEnabled ? "bg-primary" : "bg-secondary"
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                settings?.reverseProxyEnabled ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-xs font-medium text-muted-foreground">Upstream Base URL</label>
+          <input
+            type="text"
+            value={rpUrl}
+            onChange={(e) => setRpUrl(e.target.value)}
+            placeholder="https://your-upstream.replit.dev"
+            className="w-full rounded-md border border-input bg-secondary/30 px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <p className="text-xs text-muted-foreground">
+            Trailing slash is stripped. The path <code className="bg-secondary/60 px-1 rounded">/modelfarm/&lt;provider&gt;</code> is appended automatically.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-xs font-medium text-muted-foreground">
+            Upstream API Key <span className="opacity-60">(only needed if upstream sets PROXY_API_KEY)</span>
+          </label>
+          <input
+            type="password"
+            value={rpKey}
+            onChange={(e) => setRpKey(e.target.value)}
+            placeholder="sk-..."
+            className="w-full rounded-md border border-input bg-secondary/30 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveReverseProxyEndpoint}
+            disabled={rpSaving}
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            {rpSaved ? "Saved!" : rpSaving ? "Saving..." : "Save Endpoint"}
+          </button>
+          {settings?.reverseProxyEnabled && settings?.reverseProxyUrl && (
+            <span className="text-xs text-green-400">
+              Active — all providers forwarding to upstream
+            </span>
+          )}
+          {settings?.reverseProxyEnabled && !settings?.reverseProxyUrl && (
+            <span className="text-xs text-yellow-400">
+              Enabled but no URL configured — will fall back to local env
+            </span>
+          )}
+        </div>
+
+        {rpErr && <div className="text-xs text-destructive">{rpErr}</div>}
+      </div>
+
       {/* Provider Status */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div>
           <h3 className="text-sm font-semibold text-foreground">AI Provider Status</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            All providers are connected via Replit AI Integrations — no external API keys required. Usage is billed to your Replit credits.
+            {status?.reverseProxy
+              ? "Reverse-proxy mode active — providers forwarded to upstream gateway."
+              : "All providers are connected via Replit AI Integrations — no external API keys required. Usage is billed to your Replit credits."}
           </p>
         </div>
         {status ? (

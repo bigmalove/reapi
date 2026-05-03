@@ -78,10 +78,22 @@ The Replit AI Integration proxy passes through the `provider` field for some sou
 
 Default model: `gpt-4.1-mini`
 
+## Reverse-Proxy Forwarding Mode
+
+The gateway can forward all 4 providers to a remote upstream gateway instead of using this Repl's local Replit AI Integration keys. Configure in admin portal → Configuration → "Upstream Reverse Proxy".
+
+When enabled with an upstream URL, requests are routed to:
+- `<upstream>/modelfarm/openai/chat/completions` (Authorization: Bearer)
+- `<upstream>/modelfarm/anthropic/v1/messages` (x-api-key)
+- `<upstream>/modelfarm/google/<model>:generateContent` (x-goog-api-key)
+- `<upstream>/modelfarm/openrouter/chat/completions` (Authorization: Bearer)
+
+Note `gemini` provider maps to upstream segment `google`. Single upstream URL + single API key shared by all 4 providers. Switching modes is instant (no restart). Implemented in `artifacts/api-server/src/lib/providerEndpoint.ts`.
+
 ## Persistence
 
 Local JSON files in `artifacts/api-server/data/`:
-- `server_settings.json` — gateway settings (sillyTavernMode, etc.)
+- `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyUrl, reverseProxyApiKey)
 - `disabled_models.json` — list of disabled model IDs
 
 ## Features

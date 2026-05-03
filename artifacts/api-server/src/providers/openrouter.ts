@@ -1,4 +1,5 @@
 import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from "../types.js";
+import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 
 // Map Bedrock/* shorthand IDs to real OpenRouter model IDs
 const BEDROCK_MODEL_MAP: Record<string, string> = {
@@ -25,12 +26,7 @@ function isClaudeModel(modelId: string): boolean {
 export async function callOpenRouter(
   request: ChatCompletionRequest,
 ): Promise<ChatCompletionResponse | AsyncIterable<StreamChunk>> {
-  const baseUrl = process.env["AI_INTEGRATIONS_OPENROUTER_BASE_URL"];
-  const apiKey = process.env["AI_INTEGRATIONS_OPENROUTER_API_KEY"];
-
-  if (!baseUrl || !apiKey) {
-    throw new Error("Replit AI Integration for OpenRouter is not configured. AI_INTEGRATIONS_OPENROUTER_BASE_URL and AI_INTEGRATIONS_OPENROUTER_API_KEY must be set.");
-  }
+  const { baseUrl, apiKey } = resolveProviderEndpoint("openrouter");
 
   // Replit integration proxy doesn't include /v1 in path
   const url = `${baseUrl}/chat/completions`;

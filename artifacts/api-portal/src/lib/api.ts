@@ -10,10 +10,14 @@ export interface SetupStatus {
     openrouter: boolean;
     proxyKey: boolean;
   };
+  reverseProxy?: boolean;
 }
 
 export interface Settings {
   sillyTavernMode: boolean;
+  reverseProxyEnabled: boolean;
+  reverseProxyUrl: string;
+  reverseProxyApiKey: string;
 }
 
 export interface ModelEntry {
