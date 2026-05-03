@@ -32,14 +32,18 @@ export default function ConfigPage() {
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   useEffect(() => {
-    Promise.all([fetchSetupStatus(), fetchSettings()])
-      .then(([s, cfg]) => {
-        setStatus(s);
+    // Fetch independently so an auth failure on /api/settings doesn't hide
+    // setup status (PROXY_API_KEY may need to be entered first).
+    fetchSetupStatus().then(setStatus).catch((e) => setLoadErr(String(e)));
+    fetchSettings()
+      .then((cfg) => {
         setSettings(cfg);
         setRpUrl(cfg.reverseProxyUrl ?? "");
-        setRpKey(""); // never pre-fill the secret; backend doesn't return it
+        setRpKey("");
       })
-      .catch((e) => setLoadErr(String(e)));
+      .catch(() => {
+        // Likely 401 — admin key not yet entered. Silent; user will save key.
+      });
   }, []);
 
   async function toggleReverseProxy() {
@@ -275,9 +279,9 @@ export default function ConfigPage() {
               Active — all providers forwarding to upstream
             </span>
           )}
-          {settings?.reverseProxyEnabled && !settings?.reverseProxyUrl && (
-            <span className="text-xs text-yellow-400">
-              Enabled but no URL configured — will fall back to local env
+          {!settings?.reverseProxyEnabled && (
+            <span className="text-xs text-muted-foreground">
+              Disabled — using local env keys
             </span>
           )}
         </div>
