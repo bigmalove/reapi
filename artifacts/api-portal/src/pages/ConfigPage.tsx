@@ -34,16 +34,27 @@ function Badge({ ok }: { ok: boolean }) {
   );
 }
 
-function SourcePill({ source }: { source: ProviderSource | null | undefined }) {
+function SourcePill({
+  source,
+  pool,
+}: {
+  source: ProviderSource | null | undefined;
+  pool?: { size: number; mode: ReverseProxyMode; nextIndex: number | null } | undefined;
+}) {
   if (!source) return null;
   const styles: Record<ProviderSource, string> = {
     "upstream": "bg-blue-500/15 text-blue-400",
     "local-env": "bg-zinc-500/15 text-zinc-300",
     "per-provider override": "bg-purple-500/15 text-purple-400",
   };
+  let label: string = source;
+  if (source === "upstream" && pool && pool.size > 0 && pool.nextIndex !== null && pool.nextIndex !== undefined) {
+    const idx1 = pool.nextIndex + 1;
+    label = pool.mode === "sticky" ? `upstream #${idx1}/${pool.size}` : `upstream next #${idx1}/${pool.size}`;
+  }
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${styles[source]}`}>
-      {source}
+      {label}
     </span>
   );
 }
@@ -590,7 +601,7 @@ export default function ConfigPage() {
               <div key={provider} className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">{PROVIDER_LABEL[provider]}</span>
                 <div className="flex items-center gap-2">
-                  <SourcePill source={status.providerSources?.[provider] ?? null} />
+                  <SourcePill source={status.providerSources?.[provider] ?? null} pool={status.pool} />
                   <Badge ok={status.providers[provider]} />
                 </div>
               </div>
