@@ -1,46 +1,18 @@
-import { Router } from "express";
-import {
-  isReverseProxyActive,
-  peekNextPoolIndex,
-  resolveProviderSource,
-  type ProviderEndpointSource,
-  type ProviderName,
-} from "../lib/providerEndpoint.js";
-import { getSettings } from "../lib/settings.js";
+import { Router, type IRouter } from "express";
+import { listSegmentStatus } from "./modelfarm.js";
 
-const router = Router();
+const router: IRouter = Router();
 
-const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
-
-router.get("/api/setup-status", (_req, res) => {
-  const reverseProxy = isReverseProxyActive();
-  const settings = getSettings();
-
-  const sources = {} as Record<ProviderName, ProviderEndpointSource | null>;
-  const keys = {} as Record<ProviderName, boolean>;
-  for (const p of PROVIDERS) {
-    const source = resolveProviderSource(p);
-    sources[p] = source;
-    keys[p] = source !== null;
-  }
-
-  const providers = {
-    ...keys,
-    proxyKey: !!process.env["PROXY_API_KEY"],
-  };
-
-  const configured = Object.values(providers).some(Boolean);
+router.get("/setup-status", (_req, res) => {
+  const segments = listSegmentStatus();
+  const providers: Record<string, boolean> = {};
+  for (const s of segments) providers[s.segment] = s.configured;
 
   res.json({
-    configured,
+    role: "upstream-pool-node",
+    proxyKey: !!process.env["PROXY_API_KEY"],
     providers,
-    providerSources: sources,
-    reverseProxy,
-    pool: {
-      size: settings.reverseProxyPool.length,
-      mode: settings.reverseProxyMode,
-      nextIndex: peekNextPoolIndex(),
-    },
+    segments,
   });
 });
 

@@ -1,46 +1,50 @@
-# AI Gateway
+# AI Upstream Pool Node
 
 ## Overview
 
-A single-instance AI gateway deployed on Replit that unifies OpenAI, Anthropic, Google Gemini, and OpenRouter behind a single OpenAI-compatible API interface. Uses Replit AI Integrations for all model calls — no user API keys required.
+A single-instance **upstream pool node** deployed on Replit. Its sole job is to expose `/modelfarm/{openai,anthropic,google,openrouter}/*` paths and transparently forward every byte to the actual provider backends configured via Replit AI Integrations on this Repl.
+
+Other gateways (the "downstream" / orchestrator) put this node's URL into their reverse-proxy pool. This node itself does **not** do any model routing, registry, request rewriting, or response rewriting.
 
 ## Architecture
 
 Two artifacts in a pnpm monorepo:
 
-- **`artifacts/api-server`** — Express + TypeScript backend gateway (serves at `/api` and `/v1`)
-- **`artifacts/api-portal`** — React + Vite admin portal frontend (serves at `/`)
+- **`artifacts/api-server`** — Express + TypeScript proxy (serves at `/api` and `/modelfarm`)
+- **`artifacts/api-portal`** — React + Vite status portal (serves at `/`)
 
 ## Stack
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **API framework**: Express 5
-- **Frontend**: React + Vite + TypeScript + Tailwind CSS v4
-- **Build**: esbuild (ESM bundle)
-- **AI**: Replit AI Integrations (OpenAI, Anthropic, Gemini, OpenRouter)
+- pnpm workspaces, Node.js 24, Express 5, esbuild ESM bundle
+- React + Vite + TypeScript + Tailwind CSS v4
+- No database, no persisted state
 
-## Key Commands
-
-- `pnpm --filter @workspace/api-server run dev` — run API server
-- `pnpm --filter @workspace/api-portal run dev` — run admin portal
-- `pnpm --filter @workspace/api-server run build` — build API server
-
-## API Server Endpoints
+## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /healthz | Health check |
-| GET | /api/setup-status | Provider config status |
-| GET | /api/settings | Get gateway settings |
-| POST | /api/settings | Update gateway settings |
-| GET | /v1/models | List enabled models (OpenAI compatible) |
-| POST | /v1/chat/completions | Chat completion (core endpoint) |
-| GET | /v1/admin/models | List all models with status |
-| PATCH | /v1/admin/models | Enable/disable models |
+| GET    | /healthz, /api/healthz | Health check |
+| GET    | /api/setup-status | Node role + per-segment env-var status |
+| ANY    | /modelfarm/<segment>/<rest> | Transparent proxy to upstream |
 
-## Environment Variables (Replit AI Integrations — auto-provisioned)
+### `/modelfarm/<segment>` mapping
+
+| Segment | Forwarded to | Auth header injected |
+|---|---|---|
+| `openai` | `AI_INTEGRATIONS_OPENAI_BASE_URL` | `Authorization: Bearer …` |
+| `anthropic` | `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` | `x-api-key` + `anthropic-version` (passed through, default `2023-06-01`) |
+| `google` | `AI_INTEGRATIONS_GEMINI_BASE_URL` | `x-goog-api-key` |
+| `openrouter` | `AI_INTEGRATIONS_OPENROUTER_BASE_URL` | `Authorization: Bearer …` |
+
+The proxy:
+- Uses `express.raw()` so the original request body bytes are forwarded untouched.
+- Preserves request method, query string, and `Content-Type` / `Accept` headers.
+- Streams the upstream response body verbatim (so SSE works out of the box).
+- Returns `503` if the segment's env vars are missing.
+
+## Environment Variables
+
+Replit AI Integrations (auto-provisioned per provider in use):
 
 - `AI_INTEGRATIONS_OPENAI_BASE_URL` + `AI_INTEGRATIONS_OPENAI_API_KEY`
 - `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` + `AI_INTEGRATIONS_ANTHROPIC_API_KEY`
@@ -48,79 +52,18 @@ Two artifacts in a pnpm monorepo:
 - `AI_INTEGRATIONS_OPENROUTER_BASE_URL` + `AI_INTEGRATIONS_OPENROUTER_API_KEY`
 
 Optional:
-- `PROXY_API_KEY` — gateway auth key (if set, required for all /v1/* requests)
 
-## Model Routing
-
-- `gpt-*`, `o1-*`, `o3-*`, `o4-*` → OpenAI (via Replit AI Integrations, backed by Azure)
-- `claude-*` → Anthropic (via Replit AI Integrations)
-- `gemini-*` → Google Gemini (via Replit AI Integrations)
-- `provider/model` format (e.g. `meta-llama/llama-3.3-70b-instruct`) → OpenRouter (via Replit AI Integrations)
-
-### Reasoning models / thinking levels
-
-OpenAI reasoning models (`gpt-5.5`, `o*`, and OpenRouter `openai/gpt-5.5*`) accept thinking-level suffixes that map to `reasoning_effort`:
-- `-thinking-low` → `low`
-- `-thinking-medium` → `medium`
-- `-thinking-high` → `high`
-- `-thinking-xhigh` → `xhigh` (OpenAI's true highest)
-- `-thinking-max` → `xhigh` (alias for highest)
-
-Provider also strips unsupported params (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`) and converts `max_tokens` → `max_completion_tokens` for reasoning models.
-
-### OpenRouter provider pinning
-
-The Replit AI Integration proxy passes through the `provider` field for some sources but strips it for others:
-- ✅ Works: `OpenAI`, `amazon-bedrock` (US-based providers)
-- ❌ Stripped: `deepseek` (CN-based provider) — DeepSeek V4 entries fall back to OpenRouter's auto-routing (Novita / GMICloud / Together / etc.)
-
-`openai/gpt-5.5*` entries are pinned to OpenAI (not Azure) via `provider.order: ["OpenAI"]`.
-
-Default model: `gpt-4.1-mini`
-
-## Reverse-Proxy Forwarding Mode
-
-The gateway can forward all 4 providers to a **pool** of one or more remote upstream gateways instead of using this Repl's local Replit AI Integration keys. Configure in admin portal → Configuration → "Upstream Reverse Proxy Pool".
-
-When enabled, requests are routed to:
-- `<upstream>/modelfarm/openai/chat/completions` (Authorization: Bearer)
-- `<upstream>/modelfarm/anthropic/v1/messages` (x-api-key)
-- `<upstream>/modelfarm/google/<model>:generateContent` (x-goog-api-key)
-- `<upstream>/modelfarm/openrouter/chat/completions` (Authorization: Bearer)
-
-Note `gemini` provider maps to upstream segment `google`.
-
-**Pool & mode**:
-- The pool is an ordered list of `{url, apiKey}` entries.
-- `reverseProxyMode = "sticky"` — every request uses pool[0].
-- `reverseProxyMode = "round-robin"` — sequential requests rotate across the pool (process-local cursor; not persisted; not shared across processes).
-- Per-entry `apiKey` falls back to `pool[0].apiKey` when blank.
-- Per-provider overrides take precedence over the pool (single URL each).
-- Switching modes/pool is instant (no restart). Implemented in `artifacts/api-server/src/lib/providerEndpoint.ts`.
-- Each pool pick is logged at `info` level (`reverse-proxy pool pick` with `provider`, `mode`, `upstreamIndex`, `poolSize`, `url`). The portal's pool-status pill also shows the next round-robin index live.
-
-**Key preservation**: Pool POST is atomic-replace, but a row resubmitted with the *same* URL and blank `apiKey` keeps its previously stored key. Changing a row's URL drops the prior key — the new URL needs an explicit key.
-
-**Legacy compat**: PATCH `/api/settings` still accepts the old scalar `reverseProxyUrl`/`reverseProxyApiKey` and maps them onto pool[0]. Override-only legacy configs (no global URL but a global key) get the legacy key applied to every override URL that lacks its own key. GET responses expose only the new pool shape.
-
-## Persistence
-
-Local JSON files in `artifacts/api-server/data/`:
-- `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyMode, reverseProxyPool[], providerOverrides)
-- `disabled_models.json` — list of disabled model IDs
-
-## Features
-
-- OpenAI-compatible interface for all 4 providers
-- Streaming SSE support
-- Tool calling / function calling for all providers
-- SillyTavern mode (appends "继续" to Claude requests without tools)
-- Model enable/disable management
-- No database required — JSON file persistence only
+- `PROXY_API_KEY` — when set, every `/modelfarm/*` request must carry it in `Authorization: Bearer <key>` or `x-api-key: <key>`. When unset the node is open.
 
 ## Admin Portal
 
-3 tabs:
-1. **Configuration** — Base URL, gateway API key, provider status, SillyTavern toggle
-2. **Model Management** — Per-provider enable/disable with bulk controls
-3. **API Docs** — Authentication, endpoint reference, code examples
+Two tabs:
+
+1. **节点状态** — Node base URL, `PROXY_API_KEY` status, per-segment env-var status.
+2. **接入文档** — Auth, segment mapping, sample curl, how to add this node to a downstream pool.
+
+## Key Commands
+
+- `pnpm --filter @workspace/api-server run dev` — run API server
+- `pnpm --filter @workspace/api-portal run dev` — run admin portal
+- `pnpm run typecheck` — full repo typecheck

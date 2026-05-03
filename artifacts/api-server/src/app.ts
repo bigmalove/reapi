@@ -1,9 +1,8 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import router from "./routes/index.js";
-import modelsRouter from "./routes/v1/models.js";
-import chatRouter from "./routes/v1/chat.js";
+import apiRouter from "./routes/index.js";
+import modelfarmRouter from "./routes/modelfarm.js";
 import { logger } from "./lib/logger.js";
 
 const app: Express = express();
@@ -28,15 +27,25 @@ app.use(
   }),
 );
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+
+// Modelfarm proxy: mounted with raw body parser BEFORE express.json so we
+// can stream the original bytes through to upstream untouched.
+app.use(
+  "/modelfarm",
+  express.raw({ type: "*/*", limit: "50mb" }),
+  modelfarmRouter,
+);
+
+// JSON parsing for the small management API surface.
+app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// Health check at both root and /api so the artifact health probe and
+// in-app calls both work.
 app.get("/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use(router);
-app.use(modelsRouter);
-app.use(chatRouter);
+app.use("/api", apiRouter);
 
 export default app;
