@@ -48,7 +48,7 @@ function SourcePill({ source }: { source: ProviderSource | null | undefined }) {
   );
 }
 
-type PoolDraftEntry = { url: string; apiKey: string; apiKeyWasSet: boolean };
+type PoolDraftEntry = { url: string; apiKey: string; apiKeyWasSet: boolean; clearKey?: boolean };
 type OverrideDraft = { url: string; apiKey: string };
 
 function emptyDraft(): OverrideDraft {
@@ -167,7 +167,7 @@ export default function ConfigPage() {
 
   function clearPoolRowKey(i: number) {
     setPoolDraft((prev) =>
-      prev.map((e, idx) => (idx === i ? { ...e, apiKey: "", apiKeyWasSet: false, _clear: true } as PoolDraftEntry & { _clear?: boolean } : e)),
+      prev.map((e, idx) => (idx === i ? { ...e, apiKey: "", apiKeyWasSet: false, clearKey: true } : e)),
     );
   }
 
@@ -184,7 +184,7 @@ export default function ConfigPage() {
         const patch: PoolEntryPatch = { url };
         if (e.apiKey.length > 0) {
           patch.apiKey = e.apiKey;
-        } else if ((e as PoolDraftEntry & { _clear?: boolean })._clear) {
+        } else if (e.clearKey) {
           patch.apiKey = null;
         }
         // else: leave undefined → backend preserves existing key for this URL.
