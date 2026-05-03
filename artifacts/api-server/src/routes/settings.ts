@@ -65,6 +65,21 @@ router.post("/api/settings", requireAuth, (req, res) => {
     patch.reverseProxyApiKey = "";
   }
 
+  // Reject enabling reverse-proxy mode without a valid upstream URL — avoids
+  // silently falling back to local env when the user thought they had switched.
+  const current = getSettings();
+  const wantEnabled = patch.reverseProxyEnabled ?? current.reverseProxyEnabled;
+  const nextUrl = patch.reverseProxyUrl ?? current.reverseProxyUrl;
+  if (wantEnabled && !nextUrl) {
+    res.status(400).json({
+      error: {
+        message: "reverseProxyUrl must be set before enabling reverse-proxy mode",
+        type: "validation_error",
+      },
+    });
+    return;
+  }
+
   const updated = updateSettings(patch);
   res.json(toPublic(updated));
 });

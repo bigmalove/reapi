@@ -98,7 +98,7 @@ export default function ConfigPage() {
     }
   }
 
-  function saveApiKey() {
+  async function saveApiKey() {
     if (apiKey.trim()) {
       localStorage.setItem("gateway_api_key", apiKey.trim());
     } else {
@@ -106,6 +106,15 @@ export default function ConfigPage() {
     }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+    // Refetch authenticated endpoints so admin controls work immediately.
+    try {
+      const [s, cfg] = await Promise.all([fetchSetupStatus(), fetchSettings()]);
+      setStatus(s);
+      setSettings(cfg);
+      setRpUrl(cfg.reverseProxyUrl ?? "");
+    } catch (e) {
+      setLoadErr(String(e));
+    }
   }
 
   async function toggleSillyTavern() {
