@@ -80,20 +80,30 @@ Default model: `gpt-4.1-mini`
 
 ## Reverse-Proxy Forwarding Mode
 
-The gateway can forward all 4 providers to a remote upstream gateway instead of using this Repl's local Replit AI Integration keys. Configure in admin portal → Configuration → "Upstream Reverse Proxy".
+The gateway can forward all 4 providers to a **pool** of one or more remote upstream gateways instead of using this Repl's local Replit AI Integration keys. Configure in admin portal → Configuration → "Upstream Reverse Proxy Pool".
 
-When enabled with an upstream URL, requests are routed to:
+When enabled, requests are routed to:
 - `<upstream>/modelfarm/openai/chat/completions` (Authorization: Bearer)
 - `<upstream>/modelfarm/anthropic/v1/messages` (x-api-key)
 - `<upstream>/modelfarm/google/<model>:generateContent` (x-goog-api-key)
 - `<upstream>/modelfarm/openrouter/chat/completions` (Authorization: Bearer)
 
-Note `gemini` provider maps to upstream segment `google`. Single upstream URL + single API key shared by all 4 providers. Switching modes is instant (no restart). Implemented in `artifacts/api-server/src/lib/providerEndpoint.ts`.
+Note `gemini` provider maps to upstream segment `google`.
+
+**Pool & mode**:
+- The pool is an ordered list of `{url, apiKey}` entries.
+- `reverseProxyMode = "sticky"` — every request uses pool[0].
+- `reverseProxyMode = "round-robin"` — sequential requests rotate across the pool (process-local cursor; not persisted; not shared across processes).
+- Per-entry `apiKey` falls back to `pool[0].apiKey` when blank.
+- Per-provider overrides take precedence over the pool (single URL each).
+- Switching modes/pool is instant (no restart). Implemented in `artifacts/api-server/src/lib/providerEndpoint.ts`.
+
+**Legacy compat**: PATCH `/api/settings` still accepts the old scalar `reverseProxyUrl`/`reverseProxyApiKey` and maps them onto pool[0]. GET responses expose only the new pool shape.
 
 ## Persistence
 
 Local JSON files in `artifacts/api-server/data/`:
-- `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyUrl, reverseProxyApiKey)
+- `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyMode, reverseProxyPool[], providerOverrides)
 - `disabled_models.json` — list of disabled model IDs
 
 ## Features

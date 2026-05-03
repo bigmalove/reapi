@@ -9,11 +9,18 @@ export interface ProviderOverride {
 
 export type ProviderOverrides = Record<ProviderName, ProviderOverride>;
 
+export type ReverseProxyMode = "round-robin" | "sticky";
+
+export interface PoolEntry {
+  url: string;
+  apiKey: string;
+}
+
 export interface ServerSettings {
   sillyTavernMode: boolean;
   reverseProxyEnabled: boolean;
-  reverseProxyUrl: string;
-  reverseProxyApiKey: string;
+  reverseProxyMode: ReverseProxyMode;
+  reverseProxyPool: PoolEntry[];
   providerOverrides: ProviderOverrides;
 }
 
@@ -29,8 +36,8 @@ const EMPTY_OVERRIDES: ProviderOverrides = {
 const DEFAULTS: ServerSettings = {
   sillyTavernMode: false,
   reverseProxyEnabled: false,
-  reverseProxyUrl: "",
-  reverseProxyApiKey: "",
+  reverseProxyMode: "sticky",
+  reverseProxyPool: [],
   providerOverrides: EMPTY_OVERRIDES,
 };
 
@@ -58,13 +65,48 @@ function normalizeOverrides(raw: unknown): ProviderOverrides {
   return out;
 }
 
+function normalizePool(raw: unknown): PoolEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PoolEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const v = item as Record<string, unknown>;
+    const url = typeof v["url"] === "string" ? v["url"].trim().replace(/\/+$/, "") : "";
+    if (!url) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push({
+      url,
+      apiKey: typeof v["apiKey"] === "string" ? v["apiKey"] : "",
+    });
+  }
+  return out;
+}
+
+function normalizeMode(raw: unknown): ReverseProxyMode {
+  return raw === "round-robin" ? "round-robin" : "sticky";
+}
+
 export function getSettings(): ServerSettings {
   if (_settings === null) {
-    const loaded = readJson<Partial<ServerSettings>>("server_settings.json", DEFAULTS);
+    const loaded = readJson<Record<string, unknown>>("server_settings.json", {});
+    let pool = normalizePool(loaded["reverseProxyPool"]);
+    // Legacy migration: if no pool but old scalar URL exists, seed it.
+    if (pool.length === 0 && typeof loaded["reverseProxyUrl"] === "string") {
+      const legacyUrl = (loaded["reverseProxyUrl"] as string).trim().replace(/\/+$/, "");
+      if (legacyUrl) {
+        const legacyKey = typeof loaded["reverseProxyApiKey"] === "string" ? (loaded["reverseProxyApiKey"] as string) : "";
+        pool = [{ url: legacyUrl, apiKey: legacyKey }];
+      }
+    }
     _settings = {
       ...DEFAULTS,
-      ...loaded,
-      providerOverrides: normalizeOverrides(loaded.providerOverrides),
+      sillyTavernMode: typeof loaded["sillyTavernMode"] === "boolean" ? loaded["sillyTavernMode"] : DEFAULTS.sillyTavernMode,
+      reverseProxyEnabled: typeof loaded["reverseProxyEnabled"] === "boolean" ? loaded["reverseProxyEnabled"] : DEFAULTS.reverseProxyEnabled,
+      reverseProxyMode: normalizeMode(loaded["reverseProxyMode"]),
+      reverseProxyPool: pool,
+      providerOverrides: normalizeOverrides(loaded["providerOverrides"]),
     };
   }
   return _settings;
@@ -73,11 +115,23 @@ export function getSettings(): ServerSettings {
 export function updateSettings(patch: Partial<ServerSettings>): ServerSettings {
   const current = getSettings();
   const next: ServerSettings = { ...current, ...patch };
-  if (typeof next.reverseProxyUrl === "string") {
-    next.reverseProxyUrl = next.reverseProxyUrl.trim().replace(/\/+$/, "");
+
+  if (patch.reverseProxyPool) {
+    // Pool is replaced atomically; preserve existing keys when an entry with
+    // the same URL is resubmitted with a blank apiKey (the route layer also
+    // applies null-vs-empty semantics before we get here).
+    const seen = new Set<string>();
+    const cleaned: PoolEntry[] = [];
+    for (const e of patch.reverseProxyPool) {
+      const url = (e.url ?? "").trim().replace(/\/+$/, "");
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      cleaned.push({ url, apiKey: e.apiKey ?? "" });
+    }
+    next.reverseProxyPool = cleaned;
   }
+
   if (patch.providerOverrides) {
-    // Merge per-provider so callers can patch a single provider.
     const merged: ProviderOverrides = { ...current.providerOverrides };
     for (const p of ["openai", "anthropic", "gemini", "openrouter"] as const) {
       const incoming = patch.providerOverrides[p];
@@ -90,6 +144,11 @@ export function updateSettings(patch: Partial<ServerSettings>): ServerSettings {
     }
     next.providerOverrides = merged;
   }
+
+  if (patch.reverseProxyMode !== undefined) {
+    next.reverseProxyMode = normalizeMode(patch.reverseProxyMode);
+  }
+
   _settings = next;
   writeJson("server_settings.json", _settings);
   return _settings;

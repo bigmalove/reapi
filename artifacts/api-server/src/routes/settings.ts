@@ -5,12 +5,19 @@ import {
   type ServerSettings,
   type ProviderName,
   type ProviderOverrides,
+  type PoolEntry,
+  type ReverseProxyMode,
 } from "../lib/settings.js";
 import { requireAuth } from "../lib/auth.js";
 
 const router = Router();
 
 const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
+
+interface PublicPoolEntry {
+  url: string;
+  apiKeySet: boolean;
+}
 
 interface PublicProviderOverride {
   url: string;
@@ -20,8 +27,8 @@ interface PublicProviderOverride {
 interface PublicSettings {
   sillyTavernMode: boolean;
   reverseProxyEnabled: boolean;
-  reverseProxyUrl: string;
-  reverseProxyApiKeySet: boolean;
+  reverseProxyMode: ReverseProxyMode;
+  reverseProxyPool: PublicPoolEntry[];
   providerOverrides: Record<ProviderName, PublicProviderOverride>;
 }
 
@@ -36,13 +43,13 @@ function toPublic(s: ServerSettings): PublicSettings {
   return {
     sillyTavernMode: s.sillyTavernMode,
     reverseProxyEnabled: s.reverseProxyEnabled,
-    reverseProxyUrl: s.reverseProxyUrl,
-    reverseProxyApiKeySet: !!s.reverseProxyApiKey,
+    reverseProxyMode: s.reverseProxyMode,
+    reverseProxyPool: s.reverseProxyPool.map((e) => ({ url: e.url, apiKeySet: !!e.apiKey })),
     providerOverrides: overrides,
   };
 }
 
-function validateUrl(url: string, fieldName = "reverseProxyUrl"): string {
+function validateUrl(url: string, fieldName: string): string {
   const trimmed = url.trim().replace(/\/+$/, "");
   if (trimmed === "") return "";
   let parsed: URL;
@@ -62,12 +69,20 @@ router.get("/api/settings", requireAuth, (_req, res) => {
 });
 
 router.post("/api/settings", requireAuth, (req, res) => {
-  const body = (req.body ?? {}) as Partial<ServerSettings> & {
+  const body = (req.body ?? {}) as {
+    sillyTavernMode?: boolean;
+    reverseProxyEnabled?: boolean;
+    reverseProxyMode?: ReverseProxyMode;
+    reverseProxyPool?: Array<{ url?: string; apiKey?: string | null }>;
+    // Legacy back-compat fields (mapped onto pool[0]).
+    reverseProxyUrl?: string;
+    reverseProxyApiKey?: string | null;
     providerOverrides?: Partial<
       Record<ProviderName, { url?: string; apiKey?: string | null }>
     >;
   };
   const patch: Partial<ServerSettings> = {};
+  const current = getSettings();
 
   if (typeof body.sillyTavernMode === "boolean") {
     patch.sillyTavernMode = body.sillyTavernMode;
@@ -75,24 +90,97 @@ router.post("/api/settings", requireAuth, (req, res) => {
   if (typeof body.reverseProxyEnabled === "boolean") {
     patch.reverseProxyEnabled = body.reverseProxyEnabled;
   }
-  if (typeof body.reverseProxyUrl === "string") {
-    try {
-      patch.reverseProxyUrl = validateUrl(body.reverseProxyUrl);
-    } catch (e) {
-      res.status(400).json({ error: { message: (e as Error).message, type: "validation_error" } });
+  if (body.reverseProxyMode !== undefined) {
+    if (body.reverseProxyMode !== "round-robin" && body.reverseProxyMode !== "sticky") {
+      res.status(400).json({
+        error: { message: 'reverseProxyMode must be "round-robin" or "sticky"', type: "validation_error" },
+      });
       return;
     }
+    patch.reverseProxyMode = body.reverseProxyMode;
   }
-  // Only update the API key when a non-empty string is provided. Empty string
-  // means "leave unchanged"; to clear it the client must send `null`.
-  if (typeof body.reverseProxyApiKey === "string" && body.reverseProxyApiKey.length > 0) {
-    patch.reverseProxyApiKey = body.reverseProxyApiKey;
-  } else if (body.reverseProxyApiKey === null) {
-    patch.reverseProxyApiKey = "";
+
+  // Pool replacement (preferred path).
+  if (Array.isArray(body.reverseProxyPool)) {
+    const cleaned: PoolEntry[] = [];
+    const seen = new Set<string>();
+    // Build a lookup of existing keys keyed by URL so we can preserve them
+    // when client sends back the same URL with blank apiKey ("leave unchanged").
+    const existingKeyByUrl = new Map<string, string>();
+    for (const e of current.reverseProxyPool) existingKeyByUrl.set(e.url, e.apiKey);
+
+    for (let i = 0; i < body.reverseProxyPool.length; i++) {
+      const incoming = body.reverseProxyPool[i] ?? {};
+      let url: string;
+      try {
+        url = validateUrl(incoming.url ?? "", `reverseProxyPool[${i}].url`);
+      } catch (e) {
+        res.status(400).json({ error: { message: (e as Error).message, type: "validation_error" } });
+        return;
+      }
+      if (!url) {
+        res.status(400).json({
+          error: { message: `reverseProxyPool[${i}].url is required`, type: "validation_error" },
+        });
+        return;
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+
+      let apiKey: string;
+      const incomingKey = incoming.apiKey;
+      if (typeof incomingKey === "string" && incomingKey.length > 0) {
+        apiKey = incomingKey;
+      } else if (incomingKey === null) {
+        apiKey = "";
+      } else {
+        // undefined or empty string → preserve existing key for this URL
+        apiKey = existingKeyByUrl.get(url) ?? "";
+      }
+      cleaned.push({ url, apiKey });
+    }
+    patch.reverseProxyPool = cleaned;
+  } else {
+    // Legacy back-compat: reverseProxyUrl + reverseProxyApiKey map onto pool[0].
+    if (typeof body.reverseProxyUrl === "string") {
+      let legacyUrl: string;
+      try {
+        legacyUrl = validateUrl(body.reverseProxyUrl, "reverseProxyUrl");
+      } catch (e) {
+        res.status(400).json({ error: { message: (e as Error).message, type: "validation_error" } });
+        return;
+      }
+      const existingFirst = current.reverseProxyPool[0];
+      let legacyKey = existingFirst?.apiKey ?? "";
+      if (typeof body.reverseProxyApiKey === "string" && body.reverseProxyApiKey.length > 0) {
+        legacyKey = body.reverseProxyApiKey;
+      } else if (body.reverseProxyApiKey === null) {
+        legacyKey = "";
+      }
+      if (legacyUrl) {
+        // Replace pool[0] (or insert), keep the rest.
+        const rest = current.reverseProxyPool.slice(1).filter((e) => e.url !== legacyUrl);
+        patch.reverseProxyPool = [{ url: legacyUrl, apiKey: legacyKey }, ...rest];
+      } else {
+        // Legacy clear: drop pool[0] but keep the rest. (Unlikely path.)
+        patch.reverseProxyPool = current.reverseProxyPool.slice(1);
+      }
+    } else if (body.reverseProxyApiKey !== undefined) {
+      // Legacy key-only update applies to pool[0].
+      const first = current.reverseProxyPool[0];
+      if (first) {
+        let nextKey = first.apiKey;
+        if (typeof body.reverseProxyApiKey === "string" && body.reverseProxyApiKey.length > 0) {
+          nextKey = body.reverseProxyApiKey;
+        } else if (body.reverseProxyApiKey === null) {
+          nextKey = "";
+        }
+        patch.reverseProxyPool = [{ url: first.url, apiKey: nextKey }, ...current.reverseProxyPool.slice(1)];
+      }
+    }
   }
 
   if (body.providerOverrides && typeof body.providerOverrides === "object") {
-    const current = getSettings();
     const merged: ProviderOverrides = {
       openai: { ...current.providerOverrides.openai },
       anthropic: { ...current.providerOverrides.anthropic },
@@ -119,18 +207,16 @@ router.post("/api/settings", requireAuth, (req, res) => {
     patch.providerOverrides = merged;
   }
 
-  // Reject enabling reverse-proxy mode without a usable upstream URL — either
-  // the global one or at least one per-provider override.
-  const current = getSettings();
+  // Reject enabling reverse-proxy mode without any usable upstream URL.
   const wantEnabled = patch.reverseProxyEnabled ?? current.reverseProxyEnabled;
-  const nextUrl = patch.reverseProxyUrl ?? current.reverseProxyUrl;
+  const nextPool = patch.reverseProxyPool ?? current.reverseProxyPool;
   const nextOverrides = patch.providerOverrides ?? current.providerOverrides;
   const anyOverrideUrl = Object.values(nextOverrides).some((o) => !!o.url);
-  if (wantEnabled && !nextUrl && !anyOverrideUrl) {
+  if (wantEnabled && nextPool.length === 0 && !anyOverrideUrl) {
     res.status(400).json({
       error: {
         message:
-          "reverseProxyUrl (or at least one providerOverrides.<provider>.url) must be set before enabling reverse-proxy mode",
+          "reverseProxyPool (or at least one providerOverrides.<provider>.url) must be set before enabling reverse-proxy mode",
         type: "validation_error",
       },
     });

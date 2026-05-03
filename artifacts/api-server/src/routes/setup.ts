@@ -5,6 +5,7 @@ import {
   type ProviderEndpointSource,
   type ProviderName,
 } from "../lib/providerEndpoint.js";
+import { getSettings } from "../lib/settings.js";
 
 const router = Router();
 
@@ -12,6 +13,7 @@ const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "op
 
 router.get("/api/setup-status", (_req, res) => {
   const reverseProxy = isReverseProxyActive();
+  const settings = getSettings();
 
   const sources = {} as Record<ProviderName, ProviderEndpointSource | null>;
   const keys = {} as Record<ProviderName, boolean>;
@@ -33,6 +35,10 @@ router.get("/api/setup-status", (_req, res) => {
     providers,
     providerSources: sources,
     reverseProxy,
+    pool: {
+      size: settings.reverseProxyPool.length,
+      mode: settings.reverseProxyMode,
+    },
   });
 });
 

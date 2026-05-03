@@ -7,7 +7,9 @@ import {
   type Settings,
   type ProviderName,
   type ProviderSource,
+  type ReverseProxyMode,
   type SettingsPatch,
+  type PoolEntryPatch,
 } from "../lib/api";
 
 const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
@@ -46,6 +48,7 @@ function SourcePill({ source }: { source: ProviderSource | null | undefined }) {
   );
 }
 
+type PoolDraftEntry = { url: string; apiKey: string; apiKeyWasSet: boolean };
 type OverrideDraft = { url: string; apiKey: string };
 
 function emptyDraft(): OverrideDraft {
@@ -69,14 +72,14 @@ export default function ConfigPage() {
   const [saved, setSaved] = useState(false);
   const [loadErr, setLoadErr] = useState("");
 
-  // Reverse-proxy form state
-  const [rpUrl, setRpUrl] = useState("");
-  const [rpKey, setRpKey] = useState("");
+  // Pool editor state.
+  const [poolDraft, setPoolDraft] = useState<PoolDraftEntry[]>([]);
+  const [poolMode, setPoolMode] = useState<ReverseProxyMode>("sticky");
   const [rpSaving, setRpSaving] = useState(false);
   const [rpSaved, setRpSaved] = useState(false);
   const [rpErr, setRpErr] = useState("");
 
-  // Per-provider override form state (drafts; URL syncs from server, key is write-only).
+  // Per-provider override form state.
   const [overrideDrafts, setOverrideDrafts] = useState<Record<ProviderName, OverrideDraft>>(emptyDrafts());
   const [ovSavingProvider, setOvSavingProvider] = useState<ProviderName | null>(null);
   const [ovSavedProvider, setOvSavedProvider] = useState<ProviderName | null>(null);
@@ -85,8 +88,10 @@ export default function ConfigPage() {
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
 
   function syncFormsFromSettings(cfg: Settings) {
-    setRpUrl(cfg.reverseProxyUrl ?? "");
-    setRpKey("");
+    setPoolMode(cfg.reverseProxyMode);
+    setPoolDraft(
+      cfg.reverseProxyPool.map((e) => ({ url: e.url, apiKey: "", apiKeyWasSet: e.apiKeySet })),
+    );
     const next: Record<ProviderName, OverrideDraft> = emptyDrafts();
     for (const p of PROVIDERS) {
       next[p] = { url: cfg.providerOverrides?.[p]?.url ?? "", apiKey: "" };
@@ -129,38 +134,67 @@ export default function ConfigPage() {
     }
   }
 
-  async function saveReverseProxyEndpoint() {
+  async function saveModeOnly(mode: ReverseProxyMode) {
+    setPoolMode(mode);
+    setRpErr("");
+    try {
+      const updated = await updateSettings({ reverseProxyMode: mode });
+      setSettings(updated);
+    } catch (e) {
+      setRpErr(String(e));
+    }
+  }
+
+  function addPoolRow() {
+    setPoolDraft((prev) => [...prev, { url: "", apiKey: "", apiKeyWasSet: false }]);
+  }
+
+  function removePoolRow(i: number) {
+    setPoolDraft((prev) => prev.filter((_, idx) => idx !== i));
+  }
+
+  function movePoolRow(i: number, dir: -1 | 1) {
+    setPoolDraft((prev) => {
+      const next = [...prev];
+      const j = i + dir;
+      if (j < 0 || j >= next.length) return prev;
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      return next;
+    });
+  }
+
+  function clearPoolRowKey(i: number) {
+    setPoolDraft((prev) =>
+      prev.map((e, idx) => (idx === i ? { ...e, apiKey: "", apiKeyWasSet: false, _clear: true } as PoolDraftEntry & { _clear?: boolean } : e)),
+    );
+  }
+
+  async function savePool() {
     setRpSaving(true);
     setRpErr("");
     try {
-      const url = rpUrl.trim().replace(/\/+$/, "");
-      if (url && !/^https?:\/\//i.test(url)) {
-        throw new Error("URL must start with http:// or https://");
+      const entries: PoolEntryPatch[] = [];
+      for (let i = 0; i < poolDraft.length; i++) {
+        const e = poolDraft[i]!;
+        const url = e.url.trim().replace(/\/+$/, "");
+        if (!url) throw new Error(`Pool entry #${i + 1}: URL is required`);
+        if (!/^https?:\/\//i.test(url)) throw new Error(`Pool entry #${i + 1}: URL must start with http:// or https://`);
+        const patch: PoolEntryPatch = { url };
+        if (e.apiKey.length > 0) {
+          patch.apiKey = e.apiKey;
+        } else if ((e as PoolDraftEntry & { _clear?: boolean })._clear) {
+          patch.apiKey = null;
+        }
+        // else: leave undefined → backend preserves existing key for this URL.
+        entries.push(patch);
       }
-      const patch: SettingsPatch = { reverseProxyUrl: url };
-      if (rpKey.length > 0) patch.reverseProxyApiKey = rpKey;
-      const updated = await updateSettings(patch);
+      const updated = await updateSettings({ reverseProxyPool: entries, reverseProxyMode: poolMode });
       setSettings(updated);
-      setRpUrl(updated.reverseProxyUrl);
-      setRpKey("");
+      syncFormsFromSettings(updated);
       const s = await fetchSetupStatus();
       setStatus(s);
       setRpSaved(true);
       setTimeout(() => setRpSaved(false), 2000);
-    } catch (e) {
-      setRpErr(String(e));
-    } finally {
-      setRpSaving(false);
-    }
-  }
-
-  async function clearReverseProxyKey() {
-    setRpSaving(true);
-    setRpErr("");
-    try {
-      const updated = await updateSettings({ reverseProxyApiKey: null });
-      setSettings(updated);
-      setRpKey("");
     } catch (e) {
       setRpErr(String(e));
     } finally {
@@ -294,15 +328,15 @@ export default function ConfigPage() {
         </p>
       </div>
 
-      {/* Reverse Proxy / Upstream Forwarding */}
+      {/* Reverse Proxy Pool */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-semibold text-foreground">Upstream Reverse Proxy</h3>
+            <h3 className="text-sm font-semibold text-foreground">Upstream Reverse Proxy Pool</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Forward all 4 providers to a remote upstream gateway's{" "}
-              <code className="bg-secondary/60 px-1 rounded">/modelfarm/&#123;openai,anthropic,google,openrouter&#125;</code> endpoints
-              instead of using this Repl's local Replit AI Integration keys. Useful for piggybacking on a central Repl.
+              Forward all 4 providers to a pool of one or more remote upstream gateways'{" "}
+              <code className="bg-secondary/60 px-1 rounded">/modelfarm/&#123;openai,anthropic,google,openrouter&#125;</code> endpoints.
+              Choose <strong>round-robin</strong> to rotate across the pool, or <strong>sticky</strong> to always use the first entry.
             </p>
           </div>
           <button
@@ -322,64 +356,137 @@ export default function ConfigPage() {
           </button>
         </div>
 
-        <div className="space-y-2">
-          <label className="block text-xs font-medium text-muted-foreground">Global Upstream Base URL</label>
-          <input
-            type="text"
-            value={rpUrl}
-            onChange={(e) => setRpUrl(e.target.value)}
-            placeholder="https://your-upstream.replit.dev"
-            className="w-full rounded-md border border-input bg-secondary/30 px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-          <p className="text-xs text-muted-foreground">
-            Trailing slash is stripped. The path <code className="bg-secondary/60 px-1 rounded">/modelfarm/&lt;provider&gt;</code> is appended automatically. Per-provider overrides below take precedence.
-          </p>
+        {/* Mode selector */}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-muted-foreground">Mode:</span>
+          {(["round-robin", "sticky"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => saveModeOnly(m)}
+              className={`rounded-md border px-3 py-1 transition-colors ${
+                poolMode === m
+                  ? "border-primary bg-primary/15 text-primary"
+                  : "border-border bg-secondary/30 text-muted-foreground hover:bg-secondary/60"
+              }`}
+            >
+              {m === "round-robin" ? "Round-robin" : "Sticky (use #1)"}
+            </button>
+          ))}
+          <span className="ml-auto text-muted-foreground">
+            Pool: {poolDraft.length} URL{poolDraft.length === 1 ? "" : "s"}
+          </span>
         </div>
 
-        <div className="space-y-2">
-          <label className="block text-xs font-medium text-muted-foreground">
-            Global Upstream API Key <span className="opacity-60">(only needed if upstream sets PROXY_API_KEY)</span>
-          </label>
-          <div className="flex gap-2">
-            <input
-              type="password"
-              autoComplete="new-password"
-              value={rpKey}
-              onChange={(e) => setRpKey(e.target.value)}
-              placeholder={settings?.reverseProxyApiKeySet ? "•••••••• (saved — leave blank to keep)" : "sk-..."}
-              className="flex-1 rounded-md border border-input bg-secondary/30 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-            {settings?.reverseProxyApiKeySet && (
-              <button
-                type="button"
-                onClick={clearReverseProxyKey}
-                disabled={rpSaving}
-                className="rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs text-muted-foreground hover:bg-secondary/60 transition-colors disabled:opacity-50"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            The saved key is never sent back to the browser. Leave blank when saving to keep the existing one.
-          </p>
+        {/* Pool editor */}
+        <div className="space-y-3">
+          {poolDraft.length === 0 && (
+            <div className="rounded-md border border-dashed border-border/60 bg-secondary/10 p-3 text-xs text-muted-foreground">
+              No upstream URLs yet. Click "Add upstream" to add one.
+            </div>
+          )}
+          {poolDraft.map((entry, i) => (
+            <div key={i} className="rounded-md border border-border/60 bg-secondary/10 p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-foreground">
+                  Upstream #{i + 1}
+                  {i === 0 && <span className="ml-1 text-[10px] text-muted-foreground">(used in sticky mode)</span>}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={i === 0}
+                    onClick={() => movePoolRow(i, -1)}
+                    className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/60 disabled:opacity-30"
+                    title="Move up"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    disabled={i === poolDraft.length - 1}
+                    onClick={() => movePoolRow(i, 1)}
+                    className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/60 disabled:opacity-30"
+                    title="Move down"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removePoolRow(i)}
+                    className="rounded border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/20"
+                    title="Remove"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              <input
+                type="text"
+                value={entry.url}
+                onChange={(e) =>
+                  setPoolDraft((prev) =>
+                    prev.map((x, idx) => (idx === i ? { ...x, url: e.target.value } : x)),
+                  )
+                }
+                placeholder="https://your-upstream.replit.dev"
+                className="w-full rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={entry.apiKey}
+                  onChange={(e) =>
+                    setPoolDraft((prev) =>
+                      prev.map((x, idx) => (idx === i ? { ...x, apiKey: e.target.value } : x)),
+                    )
+                  }
+                  placeholder={
+                    entry.apiKeyWasSet
+                      ? "•••••••• (saved — leave blank to keep)"
+                      : i === 0
+                      ? "(blank — no auth)"
+                      : "(blank — falls back to #1's key)"
+                  }
+                  className="flex-1 rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                {entry.apiKeyWasSet && (
+                  <button
+                    type="button"
+                    onClick={() => clearPoolRowKey(i)}
+                    className="rounded-md border border-border bg-secondary/30 px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary/60 transition-colors"
+                  >
+                    Clear key
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
 
         <div className="flex items-center gap-3">
           <button
-            onClick={saveReverseProxyEndpoint}
+            type="button"
+            onClick={addPoolRow}
+            className="rounded-md border border-border bg-secondary/30 px-3 py-1.5 text-xs text-foreground hover:bg-secondary/60 transition-colors"
+          >
+            + Add upstream
+          </button>
+          <button
+            onClick={savePool}
             disabled={rpSaving}
             className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
           >
-            {rpSaved ? "Saved!" : rpSaving ? "Saving..." : "Save Endpoint"}
+            {rpSaved ? "Saved!" : rpSaving ? "Saving..." : "Save Pool"}
           </button>
-          {settings?.reverseProxyEnabled && (settings?.reverseProxyUrl || Object.values(settings?.providerOverrides ?? {}).some((o) => !!o.url)) && (
-            <span className="text-xs text-green-400">Active</span>
+          {settings?.reverseProxyEnabled && status?.reverseProxy && (
+            <span className="text-xs text-green-400">
+              Active — {status.pool?.size ?? 0} URL{(status.pool?.size ?? 0) === 1 ? "" : "s"}, {status.pool?.mode ?? "sticky"}
+            </span>
           )}
           {!settings?.reverseProxyEnabled && (
-            <span className="text-xs text-muted-foreground">
-              Disabled — using local env keys
-            </span>
+            <span className="text-xs text-muted-foreground">Disabled — using local env keys</span>
           )}
         </div>
 
@@ -391,7 +498,7 @@ export default function ConfigPage() {
         <div>
           <h3 className="text-sm font-semibold text-foreground">Per-provider Overrides</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Optionally route individual providers to a different upstream URL or with a different API key. Blank fields fall back to the global upstream above; if the global is also blank, the provider falls back to its local Replit AI Integration env vars.
+            Optionally route individual providers to a different upstream URL or with a different API key. Overrides take precedence over the pool. Blank fields fall back to the pool; if the pool is also empty, the provider falls back to its local Replit AI Integration env vars.
           </p>
         </div>
 
@@ -415,7 +522,7 @@ export default function ConfigPage() {
                   onChange={(e) =>
                     setOverrideDrafts((prev) => ({ ...prev, [provider]: { ...prev[provider], url: e.target.value } }))
                   }
-                  placeholder="(blank — use global upstream)"
+                  placeholder="(blank — use pool)"
                   className="w-full rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 />
                 <div className="flex gap-2">
@@ -426,7 +533,7 @@ export default function ConfigPage() {
                     onChange={(e) =>
                       setOverrideDrafts((prev) => ({ ...prev, [provider]: { ...prev[provider], apiKey: e.target.value } }))
                     }
-                    placeholder={stored?.apiKeySet ? "•••••••• (saved — leave blank to keep)" : "(blank — use global key)"}
+                    placeholder={stored?.apiKeySet ? "•••••••• (saved — leave blank to keep)" : "(blank — use pool's key)"}
                     className="flex-1 rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   {stored?.apiKeySet && (
@@ -465,7 +572,7 @@ export default function ConfigPage() {
           <h3 className="text-sm font-semibold text-foreground">AI Provider Status</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             {status?.reverseProxy
-              ? "Reverse-proxy mode active — providers forwarded to upstream gateway (with per-provider overrides where set)."
+              ? `Reverse-proxy mode active — pool of ${status.pool?.size ?? 0} URL${(status.pool?.size ?? 0) === 1 ? "" : "s"}, ${status.pool?.mode ?? "sticky"} mode.`
               : "All providers are connected via Replit AI Integrations — no external API keys required. Usage is billed to your Replit credits."}
           </p>
         </div>

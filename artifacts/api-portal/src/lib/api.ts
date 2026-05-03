@@ -5,6 +5,8 @@ export type ProviderName = "openai" | "anthropic" | "gemini" | "openrouter";
 
 export type ProviderSource = "upstream" | "local-env" | "per-provider override";
 
+export type ReverseProxyMode = "round-robin" | "sticky";
+
 export interface SetupStatus {
   configured: boolean;
   providers: {
@@ -16,6 +18,7 @@ export interface SetupStatus {
   };
   providerSources?: Record<ProviderName, ProviderSource | null>;
   reverseProxy?: boolean;
+  pool?: { size: number; mode: ReverseProxyMode };
 }
 
 export interface PublicProviderOverride {
@@ -23,11 +26,16 @@ export interface PublicProviderOverride {
   apiKeySet: boolean;
 }
 
+export interface PublicPoolEntry {
+  url: string;
+  apiKeySet: boolean;
+}
+
 export interface Settings {
   sillyTavernMode: boolean;
   reverseProxyEnabled: boolean;
-  reverseProxyUrl: string;
-  reverseProxyApiKeySet: boolean;
+  reverseProxyMode: ReverseProxyMode;
+  reverseProxyPool: PublicPoolEntry[];
   providerOverrides: Record<ProviderName, PublicProviderOverride>;
 }
 
@@ -37,12 +45,17 @@ export interface ProviderOverridePatch {
   apiKey?: string | null;
 }
 
+export interface PoolEntryPatch {
+  url: string;
+  // Empty string / undefined = preserve existing key for this URL; null = clear.
+  apiKey?: string | null;
+}
+
 export interface SettingsPatch {
   sillyTavernMode?: boolean;
   reverseProxyEnabled?: boolean;
-  reverseProxyUrl?: string;
-  // Empty string = leave unchanged; null = clear the stored key.
-  reverseProxyApiKey?: string | null;
+  reverseProxyMode?: ReverseProxyMode;
+  reverseProxyPool?: PoolEntryPatch[];
   providerOverrides?: Partial<Record<ProviderName, ProviderOverridePatch>>;
 }
 

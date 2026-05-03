@@ -1,4 +1,4 @@
-import { getSettings, type ProviderName } from "./settings.js";
+import { getSettings, type ProviderName, type PoolEntry } from "./settings.js";
 
 export type { ProviderName };
 
@@ -8,6 +8,8 @@ export interface ProviderEndpoint {
   baseUrl: string;
   apiKey: string;
   source: ProviderEndpointSource;
+  upstreamIndex?: number; // 0-based pool index when source === "upstream"
+  poolSize?: number;
 }
 
 const ENV_BY_PROVIDER: Record<ProviderName, { baseUrl: string; apiKey: string }> = {
@@ -25,12 +27,26 @@ const UPSTREAM_SEGMENT: Record<ProviderName, string> = {
   openrouter: "openrouter",
 };
 
+// Process-local round-robin cursor. Not persisted across restarts. Multi-process
+// deployments will not share rotation state — acceptable for a single-instance
+// gateway.
+let rrCursor = 0;
+
+function pickPoolIndex(pool: PoolEntry[], mode: "round-robin" | "sticky"): number {
+  if (pool.length === 0) return -1;
+  if (mode === "sticky") return 0;
+  const idx = rrCursor % pool.length;
+  rrCursor = (rrCursor + 1) % Number.MAX_SAFE_INTEGER;
+  return idx;
+}
+
 /**
  * Resolve the upstream endpoint for a provider.
  *
  * Resolution order when reverse-proxy mode is enabled:
- *   1. Per-provider override URL (with per-provider key, falling back to global key)
- *   2. Global upstream URL + global key
+ *   1. Per-provider override URL (with per-provider key, falling back to pool[0] key)
+ *   2. Pool entry chosen by current mode (sticky → entry 0; round-robin → next cursor)
+ *      - per-entry apiKey falls back to pool[0].apiKey if blank
  *   3. Local Replit AI Integration env vars
  *
  * When reverse-proxy mode is disabled, only env vars are consulted.
@@ -42,14 +58,25 @@ export function resolveProviderEndpoint(provider: ProviderName): ProviderEndpoin
   if (settings.reverseProxyEnabled) {
     const override = settings.providerOverrides[provider];
     const overrideUrl = override.url.trim().replace(/\/+$/, "");
-    const baseUrl = overrideUrl || settings.reverseProxyUrl;
-    if (baseUrl) {
-      const trimmed = baseUrl.replace(/\/+$/, "");
-      const apiKey = override.apiKey || settings.reverseProxyApiKey || "";
+    const defaultKey = settings.reverseProxyPool[0]?.apiKey ?? "";
+
+    if (overrideUrl) {
       return {
-        baseUrl: `${trimmed}/modelfarm/${UPSTREAM_SEGMENT[provider]}`,
-        apiKey,
-        source: overrideUrl ? "per-provider override" : "upstream",
+        baseUrl: `${overrideUrl}/modelfarm/${UPSTREAM_SEGMENT[provider]}`,
+        apiKey: override.apiKey || defaultKey,
+        source: "per-provider override",
+      };
+    }
+
+    const idx = pickPoolIndex(settings.reverseProxyPool, settings.reverseProxyMode);
+    if (idx >= 0) {
+      const entry = settings.reverseProxyPool[idx]!;
+      return {
+        baseUrl: `${entry.url}/modelfarm/${UPSTREAM_SEGMENT[provider]}`,
+        apiKey: entry.apiKey || defaultKey,
+        source: "upstream",
+        upstreamIndex: idx,
+        poolSize: settings.reverseProxyPool.length,
       };
     }
   }
@@ -68,24 +95,27 @@ export function resolveProviderEndpoint(provider: ProviderName): ProviderEndpoin
 export function isReverseProxyActive(): boolean {
   const s = getSettings();
   if (!s.reverseProxyEnabled) return false;
-  if (s.reverseProxyUrl) return true;
-  // Also active if any per-provider override URL is set.
+  if (s.reverseProxyPool.length > 0) return true;
   return Object.values(s.providerOverrides).some((o) => !!o.url);
 }
 
 /**
- * Resolve only the source label per provider, without throwing when env is
- * missing. Useful for the setup-status endpoint.
+ * Resolve only the source label per provider, without throwing or advancing
+ * the round-robin cursor. Useful for the setup-status endpoint.
  */
 export function resolveProviderSource(provider: ProviderName): ProviderEndpointSource | null {
   const settings = getSettings();
   if (settings.reverseProxyEnabled) {
     const override = settings.providerOverrides[provider];
-    const overrideUrl = override.url.trim();
-    if (overrideUrl) return "per-provider override";
-    if (settings.reverseProxyUrl) return "upstream";
+    if (override.url.trim()) return "per-provider override";
+    if (settings.reverseProxyPool.length > 0) return "upstream";
   }
   const envKeys = ENV_BY_PROVIDER[provider];
   if (process.env[envKeys.baseUrl] && process.env[envKeys.apiKey]) return "local-env";
   return null;
+}
+
+// Test-only: reset the round-robin cursor.
+export function _resetRoundRobinCursor(): void {
+  rrCursor = 0;
 }
