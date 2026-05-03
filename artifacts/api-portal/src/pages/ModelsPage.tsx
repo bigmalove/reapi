@@ -4,7 +4,7 @@ import { fetchAdminModels, patchModel, patchProviderModels, type ModelEntry } fr
 const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
-  gemini: "Google Gemini",
+  gemini: "谷歌 Gemini",
   openrouter: "OpenRouter",
 };
 
@@ -120,7 +120,7 @@ export default function ModelsPage() {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <span className="size-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        Loading models...
+        正在加载模型...
       </div>
     );
   }
@@ -130,7 +130,7 @@ export default function ModelsPage() {
       <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
         {error}
         <button onClick={load} className="ml-3 underline text-xs">
-          Retry
+          重试
         </button>
       </div>
     );
@@ -142,9 +142,9 @@ export default function ModelsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-foreground mb-1">Model Management</h2>
+        <h2 className="text-xl font-semibold text-foreground mb-1">模型管理</h2>
         <p className="text-sm text-muted-foreground">
-          {totalEnabled} of {totalModels} models enabled. Disabled models are hidden from <code className="bg-secondary/60 px-1 rounded">/v1/models</code>.
+          已启用 {totalEnabled} / {totalModels} 个模型。已禁用的模型不会出现在 <code className="bg-secondary/60 px-1 rounded">/v1/models</code> 中。
         </p>
       </div>
 
@@ -167,7 +167,7 @@ export default function ModelsPage() {
                   {PROVIDER_LABELS[group.provider] ?? group.provider}
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {enabledCount}/{group.models.length} enabled
+                  已启用 {enabledCount}/{group.models.length}
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -176,14 +176,14 @@ export default function ModelsPage() {
                   onClick={() => toggleAllForProvider(group.provider, true)}
                   className="text-xs px-2.5 py-1 rounded border border-border hover:bg-accent transition-colors disabled:opacity-40"
                 >
-                  Enable all
+                  全部启用
                 </button>
                 <button
                   disabled={isUpdatingProvider || allDisabled}
                   onClick={() => toggleAllForProvider(group.provider, false)}
                   className="text-xs px-2.5 py-1 rounded border border-border hover:bg-accent transition-colors disabled:opacity-40"
                 >
-                  Disable all
+                  全部禁用
                 </button>
               </div>
             </div>

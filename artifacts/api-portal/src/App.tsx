@@ -6,9 +6,9 @@ import DocsPage from "./pages/DocsPage";
 type Tab = "config" | "models" | "docs";
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "config", label: "Configuration" },
-  { id: "models", label: "Model Management" },
-  { id: "docs", label: "API Docs" },
+  { id: "config", label: "配置" },
+  { id: "models", label: "模型管理" },
+  { id: "docs", label: "API 文档" },
 ];
 
 function GatewayIcon() {
@@ -30,12 +30,12 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center gap-3">
           <GatewayIcon />
           <div>
-            <h1 className="text-sm font-semibold text-foreground leading-none">AI Gateway</h1>
-            <p className="text-xs text-muted-foreground leading-none mt-0.5">Admin Portal</p>
+            <h1 className="text-sm font-semibold text-foreground leading-none">AI 网关</h1>
+            <p className="text-xs text-muted-foreground leading-none mt-0.5">管理门户</p>
           </div>
           <div className="ml-auto flex items-center gap-1">
             <span className="size-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-xs text-muted-foreground">Running</span>
+            <span className="text-xs text-muted-foreground">运行中</span>
           </div>
         </div>
       </header>

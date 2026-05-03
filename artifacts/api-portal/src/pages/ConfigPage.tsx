@@ -29,7 +29,7 @@ function Badge({ ok }: { ok: boolean }) {
       }`}
     >
       <span className="size-1.5 rounded-full inline-block" style={{ background: ok ? "#4ade80" : "#f87171" }} />
-      {ok ? "Configured" : "Not set"}
+      {ok ? "已配置" : "未设置"}
     </span>
   );
 }
@@ -47,10 +47,15 @@ function SourcePill({
     "local-env": "bg-zinc-500/15 text-zinc-300",
     "per-provider override": "bg-purple-500/15 text-purple-400",
   };
-  let label: string = source;
+  const sourceLabels: Record<ProviderSource, string> = {
+    "upstream": "上游",
+    "local-env": "本地环境",
+    "per-provider override": "服务商专属覆盖",
+  };
+  let label: string = sourceLabels[source];
   if (source === "upstream" && pool && pool.size > 0 && pool.nextIndex !== null && pool.nextIndex !== undefined) {
     const idx1 = pool.nextIndex + 1;
-    label = pool.mode === "sticky" ? `upstream #${idx1}/${pool.size}` : `upstream next #${idx1}/${pool.size}`;
+    label = pool.mode === "sticky" ? `上游 #${idx1}/${pool.size}` : `上游 下一个 #${idx1}/${pool.size}`;
   }
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${styles[source]}`}>
@@ -190,8 +195,8 @@ export default function ConfigPage() {
       for (let i = 0; i < poolDraft.length; i++) {
         const e = poolDraft[i]!;
         const url = e.url.trim().replace(/\/+$/, "");
-        if (!url) throw new Error(`Pool entry #${i + 1}: URL is required`);
-        if (!/^https?:\/\//i.test(url)) throw new Error(`Pool entry #${i + 1}: URL must start with http:// or https://`);
+        if (!url) throw new Error(`第 ${i + 1} 条上游:URL 不能为空`);
+        if (!/^https?:\/\//i.test(url)) throw new Error(`第 ${i + 1} 条上游:URL 必须以 http:// 或 https:// 开头`);
         const patch: PoolEntryPatch = { url };
         if (e.apiKey.length > 0) {
           patch.apiKey = e.apiKey;
@@ -222,7 +227,7 @@ export default function ConfigPage() {
       const draft = overrideDrafts[provider];
       const url = draft.url.trim().replace(/\/+$/, "");
       if (url && !/^https?:\/\//i.test(url)) {
-        throw new Error("URL must start with http:// or https://");
+        throw new Error("URL 必须以 http:// 或 https:// 开头");
       }
       const patch: SettingsPatch = { providerOverrides: { [provider]: { url } } };
       if (draft.apiKey.length > 0) {
@@ -281,8 +286,8 @@ export default function ConfigPage() {
   return (
     <div className="max-w-2xl space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-foreground mb-1">Configuration</h2>
-        <p className="text-sm text-muted-foreground">Manage gateway settings and API key authentication.</p>
+        <h2 className="text-xl font-semibold text-foreground mb-1">配置</h2>
+        <p className="text-sm text-muted-foreground">管理网关设置与 API 密钥认证。</p>
       </div>
 
       {loadErr && (
@@ -293,20 +298,20 @@ export default function ConfigPage() {
 
       {/* Base URL */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
-        <h3 className="text-sm font-semibold text-foreground">Gateway Base URL</h3>
+        <h3 className="text-sm font-semibold text-foreground">网关基础地址</h3>
         <div className="flex items-center gap-2 rounded-md bg-secondary/50 px-3 py-2 font-mono text-sm text-foreground">
           {baseUrl}
         </div>
         <p className="text-xs text-muted-foreground">
-          Use this URL as the base for all API calls. For OpenAI-compatible clients, append <code className="bg-secondary/60 px-1 rounded">/v1</code>.
+          请将此地址作为所有 API 调用的基础地址。若使用 OpenAI 兼容客户端,请附加 <code className="bg-secondary/60 px-1 rounded">/v1</code>。
         </p>
       </div>
 
       {/* Gateway API Key */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
-        <h3 className="text-sm font-semibold text-foreground">Gateway API Key (for this browser)</h3>
+        <h3 className="text-sm font-semibold text-foreground">网关 API 密钥(仅当前浏览器)</h3>
         <p className="text-xs text-muted-foreground">
-          If you set <code className="bg-secondary/60 px-1 rounded">PROXY_API_KEY</code> as an environment variable on the server, enter it here to authenticate admin requests. Stored in local storage only.
+          若在服务端设置了环境变量 <code className="bg-secondary/60 px-1 rounded">PROXY_API_KEY</code>,请在此输入以便对管理类请求进行认证。仅保存在本地浏览器存储中。
         </p>
         <div className="flex gap-2">
           <input
@@ -320,24 +325,24 @@ export default function ConfigPage() {
             onClick={saveApiKey}
             className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 transition-opacity"
           >
-            {saved ? "Saved!" : "Save"}
+            {saved ? "已保存!" : "保存"}
           </button>
         </div>
       </div>
 
       {/* Gateway Auth Status */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
-        <h3 className="text-sm font-semibold text-foreground">Gateway Auth Status</h3>
+        <h3 className="text-sm font-semibold text-foreground">网关认证状态</h3>
         {status ? (
           <div className="flex items-center justify-between text-sm">
             <span className="text-muted-foreground">PROXY_API_KEY</span>
             <Badge ok={status.providers.proxyKey} />
           </div>
         ) : (
-          <div className="text-sm text-muted-foreground">Loading...</div>
+          <div className="text-sm text-muted-foreground">加载中...</div>
         )}
         <p className="text-xs text-muted-foreground">
-          Set <code className="bg-secondary/60 px-1 rounded">PROXY_API_KEY</code> as an environment variable to require authentication on all <code className="bg-secondary/60 px-1 rounded">/v1/*</code> requests. If not set, the gateway is open.
+          将 <code className="bg-secondary/60 px-1 rounded">PROXY_API_KEY</code> 设为环境变量后,所有 <code className="bg-secondary/60 px-1 rounded">/v1/*</code> 请求都将强制认证。若未设置,则网关开放访问。
         </p>
       </div>
 
@@ -345,11 +350,11 @@ export default function ConfigPage() {
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-semibold text-foreground">Upstream Reverse Proxy Pool</h3>
+            <h3 className="text-sm font-semibold text-foreground">上游反向代理池</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Forward all 4 providers to a pool of one or more remote upstream gateways'{" "}
-              <code className="bg-secondary/60 px-1 rounded">/modelfarm/&#123;openai,anthropic,google,openrouter&#125;</code> endpoints.
-              Choose <strong>round-robin</strong> to rotate across the pool, or <strong>sticky</strong> to always use the first entry.
+              将全部 4 家服务商的请求统一转发到一个或多个远端上游网关的{" "}
+              <code className="bg-secondary/60 px-1 rounded">/modelfarm/&#123;openai,anthropic,google,openrouter&#125;</code> 接口。
+              选择 <strong>轮询</strong> 可在池内循环使用,选择 <strong>固定</strong> 则始终使用第一条。
             </p>
           </div>
           <button
@@ -371,7 +376,7 @@ export default function ConfigPage() {
 
         {/* Mode selector */}
         <div className="flex items-center gap-2 text-xs">
-          <span className="text-muted-foreground">Mode:</span>
+          <span className="text-muted-foreground">模式:</span>
           {(["round-robin", "sticky"] as const).map((m) => (
             <button
               key={m}
@@ -383,11 +388,11 @@ export default function ConfigPage() {
                   : "border-border bg-secondary/30 text-muted-foreground hover:bg-secondary/60"
               }`}
             >
-              {m === "round-robin" ? "Round-robin" : "Sticky (use #1)"}
+              {m === "round-robin" ? "轮询" : "固定(使用 #1)"}
             </button>
           ))}
           <span className="ml-auto text-muted-foreground">
-            Pool: {poolDraft.length} URL{poolDraft.length === 1 ? "" : "s"}
+            池容量:{poolDraft.length} 条 URL
           </span>
         </div>
 
@@ -395,15 +400,15 @@ export default function ConfigPage() {
         <div className="space-y-3">
           {poolDraft.length === 0 && (
             <div className="rounded-md border border-dashed border-border/60 bg-secondary/10 p-3 text-xs text-muted-foreground">
-              No upstream URLs yet. Click "Add upstream" to add one.
+              尚未添加任何上游 URL,请点击"添加上游"新增一条。
             </div>
           )}
           {poolDraft.map((entry, i) => (
             <div key={i} className="rounded-md border border-border/60 bg-secondary/10 p-3 space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-medium text-foreground">
-                  Upstream #{i + 1}
-                  {i === 0 && <span className="ml-1 text-[10px] text-muted-foreground">(used in sticky mode)</span>}
+                  上游 #{i + 1}
+                  {i === 0 && <span className="ml-1 text-[10px] text-muted-foreground">(固定模式使用此条)</span>}
                 </span>
                 <div className="flex items-center gap-1">
                   <button
@@ -411,7 +416,7 @@ export default function ConfigPage() {
                     disabled={i === 0}
                     onClick={() => movePoolRow(i, -1)}
                     className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/60 disabled:opacity-30"
-                    title="Move up"
+                    title="上移"
                   >
                     ↑
                   </button>
@@ -420,7 +425,7 @@ export default function ConfigPage() {
                     disabled={i === poolDraft.length - 1}
                     onClick={() => movePoolRow(i, 1)}
                     className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/60 disabled:opacity-30"
-                    title="Move down"
+                    title="下移"
                   >
                     ↓
                   </button>
@@ -428,7 +433,7 @@ export default function ConfigPage() {
                     type="button"
                     onClick={() => removePoolRow(i)}
                     className="rounded border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/20"
-                    title="Remove"
+                    title="删除"
                   >
                     ✕
                   </button>
@@ -457,10 +462,10 @@ export default function ConfigPage() {
                   }
                   placeholder={
                     entry.apiKeyWasSet
-                      ? "•••••••• (saved — leave blank to keep)"
+                      ? "•••••••• (已保存 — 留空表示保留)"
                       : i === 0
-                      ? "(blank — no auth)"
-                      : "(blank — falls back to #1's key)"
+                      ? "(留空 — 不进行认证)"
+                      : "(留空 — 回退到 #1 的密钥)"
                   }
                   className="flex-1 rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 />
@@ -470,7 +475,7 @@ export default function ConfigPage() {
                     onClick={() => clearPoolRowKey(i)}
                     className="rounded-md border border-border bg-secondary/30 px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary/60 transition-colors"
                   >
-                    Clear key
+                    清除密钥
                   </button>
                 )}
               </div>
@@ -484,29 +489,29 @@ export default function ConfigPage() {
             onClick={addPoolRow}
             className="rounded-md border border-border bg-secondary/30 px-3 py-1.5 text-xs text-foreground hover:bg-secondary/60 transition-colors"
           >
-            + Add upstream
+            + 添加上游
           </button>
           <button
             onClick={savePool}
             disabled={rpSaving}
             className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
           >
-            {rpSaved ? "Saved!" : rpSaving ? "Saving..." : "Save Pool"}
+            {rpSaved ? "已保存!" : rpSaving ? "保存中..." : "保存代理池"}
           </button>
           {settings?.reverseProxyEnabled && status?.reverseProxy && (
             <span className="text-xs text-green-400">
-              Active — {status.pool?.size ?? 0} URL{(status.pool?.size ?? 0) === 1 ? "" : "s"}, {status.pool?.mode ?? "sticky"}
+              已启用 — {status.pool?.size ?? 0} 条 URL,{status.pool?.mode === "round-robin" ? "轮询" : "固定"}模式
               {status.pool?.mode === "round-robin" && status.pool?.nextIndex !== null && status.pool?.nextIndex !== undefined && (
-                <> · next: #{(status.pool.nextIndex ?? 0) + 1}/{status.pool.size}</>
+                <> · 下一个:#{(status.pool.nextIndex ?? 0) + 1}/{status.pool.size}</>
               )}
             </span>
           )}
           {!settings?.reverseProxyEnabled && (
-            <span className="text-xs text-muted-foreground">Disabled — using local env keys</span>
+            <span className="text-xs text-muted-foreground">已禁用 — 使用本地环境密钥</span>
           )}
         </div>
         <p className="text-xs text-muted-foreground mt-2">
-          Tip: Resubmitting a row with the same URL and a blank key field preserves that row's existing key. Changing the URL of a row clears its stored key — re-enter the key for the new URL.
+          提示:若 URL 不变且密钥栏留空,则保留该行原有密钥;若修改了 URL,则会清除其原有密钥,需要为新 URL 重新输入密钥。
         </p>
 
         {rpErr && <div className="text-xs text-destructive">{rpErr}</div>}
@@ -515,9 +520,9 @@ export default function ConfigPage() {
       {/* Per-provider overrides */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div>
-          <h3 className="text-sm font-semibold text-foreground">Per-provider Overrides</h3>
+          <h3 className="text-sm font-semibold text-foreground">服务商专属覆盖</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Optionally route individual providers to a different upstream URL or with a different API key. Overrides take precedence over the pool. Blank fields fall back to the pool; if the pool is also empty, the provider falls back to its local Replit AI Integration env vars.
+            可为单独的服务商指定不同的上游 URL 或 API 密钥,覆盖优先级高于代理池。留空则回退到代理池;若代理池也为空,则回退到本地 Replit AI 集成环境变量。
           </p>
         </div>
 
@@ -541,7 +546,7 @@ export default function ConfigPage() {
                   onChange={(e) =>
                     setOverrideDrafts((prev) => ({ ...prev, [provider]: { ...prev[provider], url: e.target.value } }))
                   }
-                  placeholder="(blank — use pool)"
+                  placeholder="(留空 — 使用代理池)"
                   className="w-full rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 />
                 <div className="flex gap-2">
@@ -552,7 +557,7 @@ export default function ConfigPage() {
                     onChange={(e) =>
                       setOverrideDrafts((prev) => ({ ...prev, [provider]: { ...prev[provider], apiKey: e.target.value } }))
                     }
-                    placeholder={stored?.apiKeySet ? "•••••••• (saved — leave blank to keep)" : "(blank — use pool's key)"}
+                    placeholder={stored?.apiKeySet ? "•••••••• (已保存 — 留空表示保留)" : "(留空 — 使用代理池密钥)"}
                     className="flex-1 rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   {stored?.apiKeySet && (
@@ -562,7 +567,7 @@ export default function ConfigPage() {
                       disabled={ovSavingProvider === provider}
                       className="rounded-md border border-border bg-secondary/30 px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary/60 transition-colors disabled:opacity-50"
                     >
-                      Clear key
+                      清除密钥
                     </button>
                   )}
                   <button
@@ -572,10 +577,10 @@ export default function ConfigPage() {
                     className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
                     {ovSavedProvider === provider
-                      ? "Saved!"
+                      ? "已保存!"
                       : ovSavingProvider === provider
-                        ? "Saving..."
-                        : "Save"}
+                        ? "保存中..."
+                        : "保存"}
                   </button>
                 </div>
                 {ovErr[provider] && <div className="text-xs text-destructive">{ovErr[provider]}</div>}
@@ -588,11 +593,11 @@ export default function ConfigPage() {
       {/* Provider Status */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
         <div>
-          <h3 className="text-sm font-semibold text-foreground">AI Provider Status</h3>
+          <h3 className="text-sm font-semibold text-foreground">AI 服务商状态</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             {status?.reverseProxy
-              ? `Reverse-proxy mode active — pool of ${status.pool?.size ?? 0} URL${(status.pool?.size ?? 0) === 1 ? "" : "s"}, ${status.pool?.mode ?? "sticky"} mode.`
-              : "All providers are connected via Replit AI Integrations — no external API keys required. Usage is billed to your Replit credits."}
+              ? `反向代理模式已启用 — 代理池含 ${status.pool?.size ?? 0} 条 URL,${status.pool?.mode === "round-robin" ? "轮询" : "固定"}模式。`
+              : "所有服务商均通过 Replit AI 集成接入 — 无需自备外部 API 密钥,使用量将从您的 Replit 额度中扣减。"}
           </p>
         </div>
         {status ? (
@@ -608,7 +613,7 @@ export default function ConfigPage() {
             ))}
           </div>
         ) : (
-          <div className="text-sm text-muted-foreground">Loading...</div>
+          <div className="text-sm text-muted-foreground">加载中...</div>
         )}
       </div>
 
@@ -616,11 +621,10 @@ export default function ConfigPage() {
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-foreground">SillyTavern Mode</h3>
+            <h3 className="text-sm font-semibold text-foreground">SillyTavern 模式</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              When enabled, appends{" "}
-              <code className="bg-secondary/60 px-1 rounded">{"{ role: \"user\", content: \"继续\" }"}</code> to
-              Claude requests that have no tools. Useful for SillyTavern clients.
+              启用后,会在不带工具调用的 Claude 请求末尾追加{" "}
+              <code className="bg-secondary/60 px-1 rounded">{"{ role: \"user\", content: \"继续\" }"}</code>,适用于 SillyTavern 客户端。
             </p>
           </div>
           <button
@@ -643,13 +647,13 @@ export default function ConfigPage() {
 
       {/* System info */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
-        <h3 className="text-sm font-semibold text-foreground">About This Gateway</h3>
+        <h3 className="text-sm font-semibold text-foreground">关于本网关</h3>
         <ul className="space-y-1.5 text-xs text-muted-foreground">
-          <li>• Single-instance AI gateway — no clusters, no nodes</li>
-          <li>• Unified OpenAI-compatible interface for 4 providers</li>
-          <li>• Powered by Replit AI Integrations — no external API keys needed</li>
-          <li>• Supports streaming SSE and tool calling</li>
-          <li>• Default model: <code className="bg-secondary/60 px-1 rounded">gpt-4.1-mini</code></li>
+          <li>• 单实例 AI 网关 — 无集群、无节点</li>
+          <li>• 为 4 家服务商提供统一的 OpenAI 兼容接口</li>
+          <li>• 由 Replit AI 集成驱动 — 无需自备外部 API 密钥</li>
+          <li>• 支持 SSE 流式响应与工具调用</li>
+          <li>• 默认模型:<code className="bg-secondary/60 px-1 rounded">gpt-4.1-mini</code></li>
         </ul>
       </div>
     </div>
