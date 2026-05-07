@@ -6,7 +6,7 @@ import {
   type ProviderEndpointSource,
   type ProviderName,
 } from "../lib/providerEndpoint.js";
-import { getSettings } from "../lib/settings.js";
+import { getSettings, type UpstreamNodeType } from "../lib/settings.js";
 
 const router = Router();
 
@@ -31,6 +31,18 @@ router.get("/api/setup-status", (_req, res) => {
 
   const configured = Object.values(providers).some(Boolean);
 
+  const activeNodes = settings.reverseProxyPool.map((e) => {
+    const hostname = new URL(e.url).hostname.toLowerCase();
+    const type: UpstreamNodeType = hostname.endsWith(".replit.dev") ? "replit-dev" : "replit-app";
+    return { url: e.url, type };
+  });
+
+  const disabledNodes = settings.disabledUpstreamNodes.map((e) => ({
+    url: e.url,
+    type: e.type,
+    disabledReason: e.disabledReason,
+  }));
+
   res.json({
     configured,
     providers,
@@ -40,6 +52,10 @@ router.get("/api/setup-status", (_req, res) => {
       size: settings.reverseProxyPool.length,
       mode: settings.reverseProxyMode,
       nextIndex: peekNextPoolIndex(),
+    },
+    nodes: {
+      active: activeNodes,
+      disabled: disabledNodes,
     },
   });
 });
