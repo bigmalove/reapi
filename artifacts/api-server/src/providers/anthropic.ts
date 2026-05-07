@@ -176,6 +176,7 @@ interface AnthropicApiResponse {
 
 export async function callAnthropic(
   request: ChatCompletionRequest,
+  clientHeaders: Record<string, string> = {},
 ): Promise<ChatCompletionResponse | AsyncIterable<StreamChunk>> {
   const { baseUrl, apiKey } = resolveProviderEndpoint("anthropic");
 
@@ -250,6 +251,41 @@ export async function callAnthropic(
   // claude-opus-4-7 deprecates temperature/top_p/top_k entirely (thinking or not)
   const stripSamplingParams = usesAdaptiveThinking || thinkingEnabled;
 
+  // Pull additional pass-through fields off the request. The base
+  // ChatCompletionRequest type has `[key: string]: unknown`, so we coerce
+  // through a typed view here for clarity.
+  const extra = request as ChatCompletionRequest & {
+    top_p?: number;
+    top_k?: number;
+    stop?: string | string[];
+    stop_sequences?: string[];
+    user?: string;
+    metadata?: Record<string, unknown>;
+  };
+
+  // Accept either OpenAI-style `stop` or Anthropic-style `stop_sequences`,
+  // merging both sources with dedup so callers can use either name (or both).
+  const stopParts: string[] = [];
+  if (Array.isArray(extra.stop_sequences)) {
+    stopParts.push(...extra.stop_sequences.filter((s): s is string => typeof s === "string"));
+  }
+  if (typeof extra.stop === "string") {
+    stopParts.push(extra.stop);
+  } else if (Array.isArray(extra.stop)) {
+    stopParts.push(...extra.stop.filter((s): s is string => typeof s === "string"));
+  }
+  const stopSequences = stopParts.length > 0 ? Array.from(new Set(stopParts)) : undefined;
+
+  // Anthropic-native metadata.user_id; merge with any explicit `metadata` the
+  // caller already provided.
+  let metadata: Record<string, unknown> | undefined;
+  if (extra.metadata && typeof extra.metadata === "object") {
+    metadata = { ...extra.metadata };
+  }
+  if (extra.user && typeof extra.user === "string") {
+    metadata = { ...(metadata ?? {}), user_id: extra.user };
+  }
+
   const body: Record<string, unknown> = {
     model: actualModel,
     messages: msgs,
@@ -258,6 +294,10 @@ export async function callAnthropic(
     ...(!stripSamplingParams && request.temperature !== undefined
       ? { temperature: request.temperature }
       : {}),
+    ...(!stripSamplingParams && extra.top_p !== undefined ? { top_p: extra.top_p } : {}),
+    ...(!stripSamplingParams && extra.top_k !== undefined ? { top_k: extra.top_k } : {}),
+    ...(stopSequences ? { stop_sequences: stopSequences } : {}),
+    ...(metadata ? { metadata } : {}),
     ...(request.stream ? { stream: true } : {}),
     ...thinkingBlock,
   };
@@ -267,10 +307,13 @@ export async function callAnthropic(
   }
 
   const outboundUrl = `${baseUrl}/v1/messages`;
-  const outboundHeaders = {
+  const outboundHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     "x-api-key": apiKey,
-    "anthropic-version": "2023-06-01",
+    "anthropic-version": clientHeaders["anthropic-version"] ?? "2023-06-01",
+    ...(clientHeaders["anthropic-beta"]
+      ? { "anthropic-beta": clientHeaders["anthropic-beta"] }
+      : {}),
   };
   const outboundBody = JSON.stringify(body);
 
