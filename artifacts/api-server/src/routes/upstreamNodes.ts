@@ -98,4 +98,42 @@ router.post("/api/upstream-nodes/register", (req, res) => {
   }
 });
 
+router.post("/api/upstream-nodes/re-enable", (req, res) => {
+  const body = (req.body ?? {}) as { url?: unknown };
+
+  if (typeof body.url !== "string" || !body.url.trim()) {
+    res.status(400).json({ error: { message: "url is required", type: "validation_error" } });
+    return;
+  }
+
+  const rawUrl = body.url.trim().replace(/\/+$/, "");
+  const settings = getSettings();
+
+  const disabledEntry = settings.disabledUpstreamNodes.find((e) => e.url === rawUrl);
+  if (!disabledEntry) {
+    res.status(404).json({ error: { message: "Node not found in disabled list", type: "not_found" } });
+    return;
+  }
+
+  const type = classifyHost(rawUrl);
+  if (type === "replit-dev") {
+    res.status(400).json({ error: { message: "Dev nodes cannot be re-enabled manually — they require a wakeup", type: "validation_error" } });
+    return;
+  }
+
+  const newDisabled = settings.disabledUpstreamNodes.filter((e) => e.url !== rawUrl);
+  const alreadyInPool = settings.reverseProxyPool.some((e) => e.url === rawUrl);
+  const newPool = alreadyInPool
+    ? settings.reverseProxyPool
+    : [...settings.reverseProxyPool, { url: rawUrl, apiKey: "" }];
+
+  updateSettings({
+    disabledUpstreamNodes: newDisabled,
+    reverseProxyPool: newPool,
+    reverseProxyEnabled: true,
+  });
+
+  res.json({ re_enabled: true, url: rawUrl });
+});
+
 export default router;
