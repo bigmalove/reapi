@@ -1,4 +1,4 @@
-import { readJson, writeJson } from "./persist.js";
+import { readJsonAsync, writeJson } from "./persist.js";
 
 export type Provider = "openai" | "anthropic" | "gemini" | "openrouter";
 
@@ -190,10 +190,14 @@ export function resolveProvider(modelId: string): Provider | null {
 
 let _disabledModels: Set<string> | null = null;
 
+export async function initModels(): Promise<void> {
+  const arr = await readJsonAsync<string[]>("disabled_models.json", []);
+  _disabledModels = new Set(arr);
+}
+
 function loadDisabledModels(): Set<string> {
   if (_disabledModels === null) {
-    const arr = readJson<string[]>("disabled_models.json", []);
-    _disabledModels = new Set(arr);
+    _disabledModels = new Set();
   }
   return _disabledModels;
 }
