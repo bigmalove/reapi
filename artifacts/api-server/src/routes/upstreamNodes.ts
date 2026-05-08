@@ -48,6 +48,20 @@ router.post("/api/upstream-nodes/register", (req, res) => {
   const settings = getSettings();
 
   if (type === "replit-app") {
+    // If this node was previously disabled due to upstream failure, do not
+    // re-add it to the pool — the reapi-node auto-registration would otherwise
+    // undo the disable on every heartbeat cycle.
+    const existingDisabled = settings.disabledUpstreamNodes.find((e) => e.url === rawUrl);
+    if (existingDisabled?.disabledReason === "upstream-node-unavailable") {
+      res.json({
+        registered: true,
+        type: "replit-app",
+        enabled: false,
+        disabledReason: "upstream-node-unavailable",
+      });
+      return;
+    }
+
     const pool = settings.reverseProxyPool.filter((e) => e.url !== rawUrl);
     pool.push({ url: rawUrl, apiKey: "" });
 
