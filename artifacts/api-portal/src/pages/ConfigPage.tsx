@@ -3,6 +3,7 @@ import {
   fetchSetupStatus,
   fetchSettings,
   updateSettings,
+  reEnableUpstreamNode,
   type SetupStatus,
   type Settings,
   type ProviderName,
@@ -10,6 +11,7 @@ import {
   type ReverseProxyMode,
   type SettingsPatch,
   type PoolEntryPatch,
+  type DisabledUpstreamNode,
 } from "../lib/api";
 
 const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
@@ -83,7 +85,9 @@ function emptyDrafts(): Record<ProviderName, OverrideDraft> {
 export default function ConfigPage() {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [apiKey, setApiKey] = useState(localStorage.getItem("gateway_api_key") ?? "");
+  const [apiKey, setApiKey] = useState(() => {
+    try { return localStorage.getItem("gateway_api_key") ?? ""; } catch { return ""; }
+  });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loadErr, setLoadErr] = useState("");
@@ -100,6 +104,10 @@ export default function ConfigPage() {
   const [ovSavingProvider, setOvSavingProvider] = useState<ProviderName | null>(null);
   const [ovSavedProvider, setOvSavedProvider] = useState<ProviderName | null>(null);
   const [ovErr, setOvErr] = useState<Partial<Record<ProviderName, string>>>({});
+
+  // Disabled upstream nodes re-enable state.
+  const [reEnablingUrl, setReEnablingUrl] = useState<string | null>(null);
+  const [reEnableErr, setReEnableErr] = useState<string>("");
 
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
 
@@ -258,17 +266,32 @@ export default function ConfigPage() {
   }
 
   async function saveApiKey() {
-    if (apiKey.trim()) {
-      localStorage.setItem("gateway_api_key", apiKey.trim());
-    } else {
-      localStorage.removeItem("gateway_api_key");
-    }
+    try {
+      if (apiKey.trim()) {
+        localStorage.setItem("gateway_api_key", apiKey.trim());
+      } else {
+        localStorage.removeItem("gateway_api_key");
+      }
+    } catch { }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
     try {
       await refreshAll();
     } catch (e) {
       setLoadErr(String(e));
+    }
+  }
+
+  async function handleReEnable(url: string) {
+    setReEnablingUrl(url);
+    setReEnableErr("");
+    try {
+      await reEnableUpstreamNode(url);
+      await refreshAll();
+    } catch (e) {
+      setReEnableErr(String(e));
+    } finally {
+      setReEnablingUrl(null);
     }
   }
 
@@ -516,6 +539,67 @@ export default function ConfigPage() {
 
         {rpErr && <div className="text-xs text-destructive">{rpErr}</div>}
       </div>
+
+      {/* Disabled Upstream Nodes */}
+      {settings && settings.disabledUpstreamNodes && settings.disabledUpstreamNodes.length > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-5 space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-amber-400">被屏蔽的上游节点</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              以下节点因出错被自动屏蔽。可点击"重新启用"将其恢复至代理池。
+            </p>
+          </div>
+          <div className="space-y-3">
+            {settings.disabledUpstreamNodes.map((node: DisabledUpstreamNode) => {
+              const isDev = node.type === "replit-dev";
+              const reasonLabel =
+                node.disabledReason === "upstream-node-unavailable"
+                  ? "上游节点不可用"
+                  : node.disabledReason === "requires-wakeup"
+                  ? "需要唤醒 (Dev 节点)"
+                  : node.disabledReason;
+              return (
+                <div
+                  key={node.url}
+                  className="rounded-md border border-amber-500/20 bg-secondary/10 p-3 space-y-1.5"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-xs text-foreground break-all">{node.url}</div>
+                      <div className="flex flex-wrap gap-2 mt-1">
+                        <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/15 text-amber-400">
+                          {reasonLabel}
+                        </span>
+                        {node.disabledAt && (
+                          <span className="text-[10px] text-muted-foreground">
+                            {new Date(node.disabledAt).toLocaleString("zh-CN")}
+                          </span>
+                        )}
+                      </div>
+                      {node.lastError && (
+                        <div className="mt-1 text-[10px] text-muted-foreground truncate">
+                          错误: {node.lastError}
+                        </div>
+                      )}
+                    </div>
+                    {!isDev && (
+                      <button
+                        type="button"
+                        disabled={reEnablingUrl === node.url}
+                        onClick={() => handleReEnable(node.url)}
+                        className="shrink-0 rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                      >
+                        {reEnablingUrl === node.url ? "处理中..." : "重新启用"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {reEnableErr && <div className="text-xs text-destructive">{reEnableErr}</div>}
+        </div>
+      )}
 
       {/* Per-provider overrides */}
       <div className="rounded-lg border border-border bg-card p-5 space-y-4">
