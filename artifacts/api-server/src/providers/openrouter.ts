@@ -24,6 +24,10 @@ function isClaudeModel(modelId: string): boolean {
   return modelId.includes("claude") || modelId.startsWith("anthropic/");
 }
 
+function isDeepSeekModel(modelId: string): boolean {
+  return modelId.startsWith("deepseek/");
+}
+
 export async function callOpenRouter(
   request: ChatCompletionRequest,
   clientHeaders: Record<string, string> = {},
@@ -62,6 +66,7 @@ export async function callOpenRouter(
   }
 
   const isClaude = isClaudeModel(actualModel);
+  const isDeepSeek = isDeepSeekModel(actualModel);
 
   // OpenAI reasoning models on OpenRouter (gpt-5.x, gpt-5.x-pro, o-series)
   const isOpenAIReasoningModel = /^openai\/(gpt-5(\.\d+)?(-pro|-mini|-nano)?|o\d[\w-]*)$/.test(actualModel);
@@ -158,6 +163,25 @@ export async function callOpenRouter(
     const effort = explicitEffort ?? budgetToEffort(budgetTokens);
     body["thinking"] = { type: "adaptive", display: "summarized" };
     body["output_config"] = { effort };
+  } else if (thinkingEnabled && isDeepSeek) {
+    // DeepSeek uses OpenAI-compatible format:
+    //   thinking: { type: "enabled" }  — enable thinking mode
+    //   reasoning_effort: "high"|"max" — control intensity
+    // Per DeepSeek docs: low/medium → high, xhigh → max
+    // OpenRouter reasoning_effort enum: xhigh | high | medium | low | minimal | none
+    // DeepSeek docs say xhigh→max, but OpenRouter doesn't accept "max" — use "xhigh" as ceiling
+    const DEEPSEEK_EFFORT_MAP: Record<string, string> = {
+      low:    "low",
+      medium: "medium",
+      high:   "high",
+      xhigh:  "xhigh",
+      max:    "xhigh",
+    };
+    const effort = explicitEffort
+      ? (DEEPSEEK_EFFORT_MAP[explicitEffort] ?? "high")
+      : "high";
+    body["thinking"] = { type: "enabled" };
+    body["reasoning_effort"] = effort;
   } else if (thinkingEnabled && !isOpenAIReasoningModel) {
     // Anthropic-style budget_tokens thinking (skip for OpenAI — already handled above)
     const budgetTokens = explicitEffort
