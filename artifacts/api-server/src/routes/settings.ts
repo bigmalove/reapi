@@ -24,12 +24,23 @@ interface PublicProviderOverride {
   apiKeySet: boolean;
 }
 
+interface PublicDisabledNode {
+  url: string;
+  type: string;
+  disabledReason: string;
+  disabledAt?: string;
+  lastError?: string;
+  upstreamReason?: string;
+  upstreamStatus?: number;
+}
+
 interface PublicSettings {
   sillyTavernMode: boolean;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PublicPoolEntry[];
   providerOverrides: Record<ProviderName, PublicProviderOverride>;
+  disabledUpstreamNodes: PublicDisabledNode[];
 }
 
 function toPublic(s: ServerSettings): PublicSettings {
@@ -46,6 +57,15 @@ function toPublic(s: ServerSettings): PublicSettings {
     reverseProxyMode: s.reverseProxyMode,
     reverseProxyPool: s.reverseProxyPool.map((e) => ({ url: e.url, apiKeySet: !!e.apiKey })),
     providerOverrides: overrides,
+    disabledUpstreamNodes: s.disabledUpstreamNodes.map((n) => ({
+      url: n.url,
+      type: n.type,
+      disabledReason: n.disabledReason,
+      disabledAt: n.disabledAt,
+      lastError: n.lastError,
+      upstreamReason: n.upstreamReason,
+      upstreamStatus: n.upstreamStatus,
+    })),
   };
 }
 
