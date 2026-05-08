@@ -20,6 +20,7 @@ Two artifacts in a pnpm monorepo:
 - **Frontend**: React + Vite + TypeScript + Tailwind CSS v4
 - **Build**: esbuild (ESM bundle)
 - **AI**: Replit AI Integrations (OpenAI, Anthropic, Gemini, OpenRouter)
+- **Database**: PostgreSQL 16 (Replit managed, via `pg` driver)
 
 ## Key Commands
 
@@ -35,6 +36,8 @@ Two artifacts in a pnpm monorepo:
 | GET | /api/setup-status | Provider config status |
 | GET | /api/settings | Get gateway settings |
 | POST | /api/settings | Update gateway settings |
+| POST | /api/upstream-nodes/register | Register an upstream node |
+| POST | /api/upstream-nodes/re-enable | Re-enable a disabled upstream node |
 | GET | /v1/models | List enabled models (OpenAI compatible) |
 | POST | /v1/chat/completions | Chat completion (core endpoint) |
 | GET | /v1/admin/models | List all models with status |
@@ -49,6 +52,10 @@ Two artifacts in a pnpm monorepo:
 
 Optional:
 - `PROXY_API_KEY` — gateway auth key (if set, required for all /v1/* requests)
+
+Database (auto-provisioned by Replit PostgreSQL 16):
+- `DATABASE_URL` — full connection string
+- `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`
 
 ## Model Routing
 
@@ -105,9 +112,21 @@ Note `gemini` provider maps to upstream segment `google`.
 
 ## Persistence
 
-Local JSON files in `artifacts/api-server/data/`:
-- `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyMode, reverseProxyPool[], providerOverrides)
+PostgreSQL 16 (Replit managed). All data is stored in a single `kv_store` table:
+
+```sql
+CREATE TABLE IF NOT EXISTS kv_store (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+Keys stored:
+- `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyMode, reverseProxyPool[], disabledUpstreamNodes[], providerOverrides)
 - `disabled_models.json` — list of disabled model IDs
+
+On startup, `initSettings()` and `initModels()` load from the database into an in-memory cache. All writes go to the database immediately via `writeJsonAsync`. Data survives restarts and deployments.
 
 ## Features
 
@@ -116,7 +135,8 @@ Local JSON files in `artifacts/api-server/data/`:
 - Tool calling / function calling for all providers
 - SillyTavern mode (appends "继续" to Claude requests without tools)
 - Model enable/disable management
-- No database required — JSON file persistence only
+- PostgreSQL 16 persistence — settings and node state survive restarts
+- Disabled upstream node management — re-enable auto-blocked nodes from the portal
 
 ## Admin Portal
 
