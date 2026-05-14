@@ -4,6 +4,8 @@ import pinoHttp from "pino-http";
 import router from "./routes/index.js";
 import modelsRouter from "./routes/v1/models.js";
 import chatRouter from "./routes/v1/chat.js";
+import imagesRouter from "./routes/v1/images.js";
+import videosRouter from "./routes/v1/videos.js";
 import { logger } from "./lib/logger.js";
 
 const app: Express = express();
@@ -38,5 +40,7 @@ app.get("/healthz", (_req, res) => {
 app.use(router);
 app.use(modelsRouter);
 app.use(chatRouter);
+app.use(imagesRouter);
+app.use(videosRouter);
 
 export default app;
