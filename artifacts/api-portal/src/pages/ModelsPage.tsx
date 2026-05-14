@@ -126,9 +126,17 @@ export default function ModelsPage() {
   }
 
   if (error) {
+    const isUnauth = error.includes("Unauthorized") || error.includes("401");
     return (
       <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
-        {error}
+        {isUnauth ? (
+          <span>
+            需要认证。请先在
+            <strong>配置</strong>页面输入网关 API 密钥并保存，然后
+          </span>
+        ) : (
+          error
+        )}
         <button onClick={load} className="ml-3 underline text-xs">
           重试
         </button>
