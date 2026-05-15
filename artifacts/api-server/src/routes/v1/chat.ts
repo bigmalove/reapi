@@ -6,7 +6,10 @@ import { callOpenAI } from "../../providers/openai.js";
 import { callAnthropic } from "../../providers/anthropic.js";
 import { callGemini } from "../../providers/gemini.js";
 import { callOpenRouter } from "../../providers/openrouter.js";
+import { logger } from "../../lib/logger.js";
 import type { ChatCompletionRequest, StreamChunk } from "../../types.js";
+
+const MAX_ATTEMPTS = 3;
 
 const router = Router();
 
@@ -70,54 +73,63 @@ router.post("/v1/chat/completions", requireAuth, async (req: Request, res: Respo
   const request: ChatCompletionRequest = { ...body, model, messages };
   const clientHeaders = extractPassthroughHeaders(req);
 
-  try {
-    let result: Awaited<ReturnType<typeof callOpenAI>>;
-
+  async function callProvider() {
     switch (provider) {
-      case "openai":
-        result = await callOpenAI(request, clientHeaders);
-        break;
-      case "anthropic":
-        result = await callAnthropic(request, clientHeaders);
-        break;
-      case "gemini":
-        result = await callGemini(request, clientHeaders);
-        break;
-      case "openrouter":
-        result = await callOpenRouter(request, clientHeaders);
-        break;
-      default:
-        res.status(500).json({ error: { message: "Unknown provider" } });
-        return;
+      case "openai":      return callOpenAI(request, clientHeaders);
+      case "anthropic":   return callAnthropic(request, clientHeaders);
+      case "gemini":      return callGemini(request, clientHeaders);
+      case "openrouter":  return callOpenRouter(request, clientHeaders);
+      default:            throw new Error("Unknown provider");
     }
+  }
 
-    if (body.stream) {
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.flushHeaders();
+  let result: Awaited<ReturnType<typeof callOpenAI>> | undefined;
+  let lastErr: unknown;
 
-      try {
-        for await (const chunk of result as AsyncIterable<StreamChunk>) {
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-        }
-        res.write("data: [DONE]\n\n");
-      } catch (streamErr) {
-        const message = streamErr instanceof Error ? streamErr.message : "Stream error";
-        req.log.error({ err: streamErr }, "Stream error during chat completion");
-        res.write(`data: ${JSON.stringify({ error: { message, type: "stream_error" } })}\n\n`);
-      } finally {
-        res.end();
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      result = await callProvider();
+      break;
+    } catch (err) {
+      lastErr = err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt < MAX_ATTEMPTS) {
+        logger.warn({ err, attempt, maxAttempts: MAX_ATTEMPTS, provider }, `attempt ${attempt} failed, retrying with next node`);
+      } else {
+        logger.error({ err, attempt, provider }, "all attempts exhausted");
       }
-    } else {
-      res.json(result);
     }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    req.log.error({ err }, "Chat completion error");
+  }
+
+  if (result === undefined) {
+    const message = lastErr instanceof Error ? lastErr.message : "Unknown error";
+    req.log.error({ err: lastErr }, "Chat completion error after all retries");
     if (!res.headersSent) {
       res.status(502).json({ error: { message, type: "upstream_error" } });
     }
+    return;
+  }
+
+  if (body.stream) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    try {
+      for await (const chunk of result as AsyncIterable<StreamChunk>) {
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      }
+      res.write("data: [DONE]\n\n");
+    } catch (streamErr) {
+      const message = streamErr instanceof Error ? streamErr.message : "Stream error";
+      req.log.error({ err: streamErr }, "Stream error during chat completion");
+      res.write(`data: ${JSON.stringify({ error: { message, type: "stream_error" } })}\n\n`);
+    } finally {
+      res.end();
+    }
+  } else {
+    res.json(result);
   }
 });
 
