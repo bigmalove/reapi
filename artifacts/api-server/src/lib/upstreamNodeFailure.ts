@@ -1,5 +1,6 @@
 import { disableUpstreamNode } from "./settings.js";
 import { logger } from "./logger.js";
+import { setNodeCooldown } from "./providerEndpoint.js";
 import type { ProviderEndpoint } from "./providerEndpoint.js";
 
 interface NodeDisableSignal {
@@ -9,7 +10,12 @@ interface NodeDisableSignal {
   message: string;
 }
 
-function parseNodeDisableSignal(status: number, body: string): NodeDisableSignal | null {
+type NodeSignal =
+  | ({ action: "disable" } & NodeDisableSignal)
+  | { action: "cooldown"; upstreamStatus: number }
+  | null;
+
+function parseNodeSignal(status: number, body: string): NodeSignal {
   if (status !== 502 && status !== 401) return null;
 
   let parsed: unknown;
@@ -41,7 +47,14 @@ function parseNodeDisableSignal(status: number, body: string): NodeDisableSignal
     return null;
   }
 
+  // 429 from upstream means rate-limiting — temporary, not a permanent failure.
+  // Signal cooldown instead of disable.
+  if (error.upstreamStatus === 429) {
+    return { action: "cooldown", upstreamStatus: 429 };
+  }
+
   return {
+    action: "disable",
     provider: typeof error.provider === "string" ? error.provider : "unknown",
     reason: typeof error.reason === "string" ? error.reason : "unknown",
     upstreamStatus: typeof error.upstreamStatus === "number" ? error.upstreamStatus : undefined,
@@ -78,6 +91,17 @@ export function maybeDisableSelectedNode(args: {
       upstreamStatus: responseStatus,
       lastError: "Replit hosting shutdown page returned (node likely out of credits)",
     });
+    return;
+  }
+
+  // A raw 429 from the upstream node means it is rate-limited — temporary.
+  // Apply a cooldown so round-robin skips it for a while, but do not remove it.
+  if (responseStatus === 429) {
+    logger.warn(
+      { nodeUrl: endpoint.nodeUrl },
+      "upstream node returned 429 Too Many Requests — applying cooldown",
+    );
+    setNodeCooldown(endpoint.nodeUrl);
     return;
   }
 
@@ -119,8 +143,19 @@ export function maybeDisableSelectedNode(args: {
     return;
   }
 
-  const signal = parseNodeDisableSignal(responseStatus, responseBody);
+  const signal = parseNodeSignal(responseStatus, responseBody);
   if (!signal) return;
+
+  // Wrapped 429: the gateway returned 502 but the root cause is upstream rate-limiting.
+  // Apply cooldown rather than permanently removing the node.
+  if (signal.action === "cooldown") {
+    logger.warn(
+      { nodeUrl: endpoint.nodeUrl, upstreamStatus: signal.upstreamStatus },
+      "upstream node rate-limited (wrapped 429) — applying cooldown",
+    );
+    setNodeCooldown(endpoint.nodeUrl);
+    return;
+  }
 
   logger.warn(
     {
