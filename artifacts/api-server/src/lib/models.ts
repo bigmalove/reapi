@@ -126,7 +126,11 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "deepseek/deepseek-r1-0528",         provider: "openrouter", created: 1748995200 },
   { id: "mistralai/mistral-small-2603",      provider: "openrouter", created: 1741392000 },
   { id: "qwen/qwen3.5-122b-a10b",            provider: "openrouter", created: 1751328000 },
+  { id: "qwen/qwen3.6-max-preview",          provider: "openrouter", created: 1747267200 },
+  { id: "moonshotai/kimi-k2.6",              provider: "openrouter", created: 1747267200 },
+  { id: "z-ai/glm-5.1",                      provider: "openrouter", created: 1747267200 },
   { id: "google/gemini-2.5-pro",             provider: "openrouter", created: 1748995200 },
+  { id: "google/gemini-3.1-pro-preview",     provider: "openrouter", created: 1747267200 },
   // Anthropic via OpenRouter → forced to AWS Bedrock
   { id: "Bedrock/claude-4.7-opus",                       provider: "openrouter", created: 1756684800 },
   { id: "Bedrock/claude-4.7-opus-thinking",              provider: "openrouter", created: 1756684800 },
