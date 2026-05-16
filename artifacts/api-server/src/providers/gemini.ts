@@ -195,7 +195,21 @@ export async function callGemini(
   // Resolve thinking variants: strip suffix and enable thinking config
   let actualModelId = request.model;
   let thinkingEnabled = false;
-  if (actualModelId.endsWith("-thinking-visible") || actualModelId.endsWith("-thinking")) {
+  let thinkingBudget: number = -1; // -1 = dynamic budget
+
+  const budgetLevelMap: Record<string, number> = {
+    low:    1024,
+    medium: 8192,
+    high:   16384,
+    max:    32768,
+  };
+
+  const budgetLevelMatch = actualModelId.match(/-thinking-(low|medium|high|max)$/);
+  if (budgetLevelMatch) {
+    thinkingEnabled = true;
+    thinkingBudget = budgetLevelMap[budgetLevelMatch[1]];
+    actualModelId = actualModelId.replace(/-thinking-(low|medium|high|max)$/, "");
+  } else if (actualModelId.endsWith("-thinking-visible") || actualModelId.endsWith("-thinking")) {
     thinkingEnabled = true;
     actualModelId = actualModelId.replace(/-thinking-visible$/, "").replace(/-thinking$/, "");
   }
@@ -278,8 +292,8 @@ export async function callGemini(
       ...(extra.seed !== undefined ? { seed: extra.seed } : {}),
       ...(extra.n !== undefined ? { candidateCount: extra.n } : {}),
       ...(responseFormat ? responseFormat : {}),
-      // Enable extended thinking for thinking variants (-1 = dynamic budget)
-      ...(thinkingEnabled ? { thinkingConfig: { thinkingBudget: -1 } } : {}),
+      // Enable extended thinking for thinking variants (-1 = dynamic budget, or preset budget in tokens)
+      ...(thinkingEnabled ? { thinkingConfig: { thinkingBudget } } : {}),
     },
   };
 
