@@ -97,6 +97,8 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "gemini-3.1-pro-preview-thinking-medium",    provider: "gemini", created: 1753142400 },
   { id: "gemini-3.1-pro-preview-thinking-high",      provider: "gemini", created: 1753142400 },
   { id: "gemini-3.1-pro-preview-thinking-max",       provider: "gemini", created: 1753142400 },
+  { id: "gemini-3.1-flash-image-preview",            provider: "gemini", created: 1753142400 },
+  { id: "gemini-3.1-flash-lite-preview",             provider: "gemini", created: 1753142400 },
   { id: "gemini-3-flash-preview",                    provider: "gemini", created: 1751328000 },
   { id: "gemini-3-flash-preview-thinking",           provider: "gemini", created: 1751328000 },
   { id: "gemini-3-flash-preview-thinking-visible",   provider: "gemini", created: 1751328000 },
@@ -106,6 +108,14 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "gemini-2.5-flash",                          provider: "gemini", created: 1747699200 },
   { id: "gemini-2.5-flash-thinking",                 provider: "gemini", created: 1747699200 },
   { id: "gemini-2.5-flash-thinking-visible",         provider: "gemini", created: 1747699200 },
+  { id: "gemini-3.5-flash",                           provider: "gemini", created: 1753747200 },
+  { id: "gemini-3.5-flash-thinking",                 provider: "gemini", created: 1753747200 },
+  { id: "gemini-3.5-flash-thinking-visible",         provider: "gemini", created: 1753747200 },
+  { id: "gemini-3.5-flash-thinking-low",             provider: "gemini", created: 1753747200 },
+  { id: "gemini-3.5-flash-thinking-medium",          provider: "gemini", created: 1753747200 },
+  { id: "gemini-3.5-flash-thinking-high",            provider: "gemini", created: 1753747200 },
+  { id: "gemini-3.5-flash-thinking-max",             provider: "gemini", created: 1753747200 },
+  { id: "gemini-2.5-flash-lite",                     provider: "gemini", created: 1751328000 },
 
   // ── OpenRouter Featured ───────────────────────────────────────────────────
   { id: "x-ai/grok-4.20",                   provider: "openrouter", created: 1753142400 },
@@ -133,6 +143,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "qwen/qwen3.6-max-preview",          provider: "openrouter", created: 1747267200 },
   { id: "moonshotai/kimi-k2.6",              provider: "openrouter", created: 1747267200 },
   { id: "z-ai/glm-5.1",                      provider: "openrouter", created: 1747267200 },
+  { id: "google/gemini-3.5-flash",            provider: "openrouter", created: 1753747200 },
   { id: "google/gemini-2.5-pro",             provider: "openrouter", created: 1748995200 },
   { id: "google/gemini-3.1-pro-preview",     provider: "openrouter", created: 1747267200 },
   // Anthropic via OpenRouter → forced to AWS Bedrock
