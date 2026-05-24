@@ -204,11 +204,11 @@ export default function ConfigPage() {
   }
 
   async function saveModeOnly(mode: ReverseProxyMode) {
-    setPoolMode(mode);
     setRpErr("");
     try {
       const updated = await updateSettings({ reverseProxyMode: mode });
       setSettings(updated);
+      syncFormsFromSettings(updated);
       const s = await fetchSetupStatus();
       setStatus(s);
     } catch (e) {
