@@ -68,8 +68,10 @@ router.post("/api/upstream-nodes/register", (req, res) => {
       return;
     }
 
-    const pool = settings.reverseProxyPool.filter((e) => e.url !== rawUrl);
-    pool.push({ url: rawUrl, apiKey: "" });
+    const alreadyInPool = settings.reverseProxyPool.some((e) => e.url === rawUrl);
+    const pool = alreadyInPool
+      ? settings.reverseProxyPool
+      : [...settings.reverseProxyPool, { url: rawUrl, apiKey: "" }];
 
     const disabled = settings.disabledUpstreamNodes.filter((e) => e.url !== rawUrl);
 
