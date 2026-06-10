@@ -210,11 +210,15 @@ export async function callAnthropic(
   // Models using adaptive thinking API (effort-based); all others use legacy budget_tokens
   const ADAPTIVE_THINKING_MODELS = new Set([
     "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable-5",
   ]);
   const usesAdaptiveThinking = ADAPTIVE_THINKING_MODELS.has(actualModel);
 
-  const maxTokens = request.max_tokens ?? (thinkingEnabled ? 16000 : 4096);
-  const thinkingBudget = thinkingEnabled ? Math.floor(maxTokens * 0.8) : 0;
+  // Anthropic requires budget_tokens >= 1024; ensure max_tokens is high enough.
+  const requestedMax = request.max_tokens ?? (thinkingEnabled ? 16000 : 4096);
+  const maxTokens = thinkingEnabled ? Math.max(requestedMax, 2048) : requestedMax;
+  const thinkingBudget = thinkingEnabled ? Math.max(Math.floor(maxTokens * 0.8), 1024) : 0;
 
   // Map token budget → effort level (adaptive thinking)
   function budgetToEffort(budget: number): string {
