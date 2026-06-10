@@ -8,6 +8,8 @@ const BEDROCK_MODEL_MAP: Record<string, string> = {
   "Bedrock/claude-4.7-opus-thinking":  "anthropic/claude-opus-4.7",
   "Bedrock/claude-4.6-opus":           "anthropic/claude-opus-4.6",
   "Bedrock/claude-4.6-opus-thinking":  "anthropic/claude-opus-4.6",
+  "Bedrock/claude-fable-5":            "anthropic/claude-fable-5",
+  "Bedrock/claude-fable-5-thinking":   "anthropic/claude-fable-5",
 };
 
 function resolveBedrockAlias(modelId: string): { model: string; forceThinking: boolean } {
@@ -75,6 +77,8 @@ export async function callOpenRouter(
   // actualModel is the resolved OpenRouter model ID (after Bedrock alias lookup)
   const ADAPTIVE_THINKING_MODELS = new Set([
     "anthropic/claude-opus-4.7",
+    "anthropic/claude-opus-4.8",
+    "anthropic/claude-fable-5",
   ]);
   const usesAdaptiveThinking = ADAPTIVE_THINKING_MODELS.has(actualModel);
 
@@ -192,9 +196,13 @@ export async function callOpenRouter(
     body["reasoning_effort"] = effort;
   } else if (thinkingEnabled && !isOpenAIReasoningModel) {
     // Anthropic-style budget_tokens thinking (skip for OpenAI — already handled above)
-    const budgetTokens = explicitEffort
-      ? effortToTokens(explicitEffort, maxTokens)
-      : Math.floor(maxTokens * 0.8);
+    // Anthropic requires budget_tokens >= 1024; ensure max_tokens is high enough too.
+    const effectiveMax = Math.max(maxTokens, 2048);
+    if (effectiveMax !== maxTokens) body["max_tokens"] = effectiveMax;
+    const rawBudget = explicitEffort
+      ? effortToTokens(explicitEffort, effectiveMax)
+      : Math.floor(effectiveMax * 0.8);
+    const budgetTokens = Math.max(rawBudget, 1024);
     body["thinking"] = { type: "enabled", budget_tokens: budgetTokens };
     delete body["temperature"];
   }
