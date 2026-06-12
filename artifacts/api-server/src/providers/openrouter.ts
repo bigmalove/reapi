@@ -54,6 +54,11 @@ export async function callOpenRouter(
     }
   }
 
+  // Strip leading ~ (deprecated alias marker) before further resolution
+  if (rawModel.startsWith("~")) {
+    rawModel = rawModel.slice(1);
+  }
+
   // Resolve Bedrock/* shorthand aliases
   const { model: resolvedFromAlias, forceThinking } = resolveBedrockAlias(rawModel);
 
@@ -79,6 +84,7 @@ export async function callOpenRouter(
     "anthropic/claude-opus-4.7",
     "anthropic/claude-opus-4.8",
     "anthropic/claude-fable-5",
+    "anthropic/claude-fable-latest",
   ]);
   const usesAdaptiveThinking = ADAPTIVE_THINKING_MODELS.has(actualModel);
 
