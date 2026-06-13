@@ -159,6 +159,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "qwen/qwen3.5-122b-a10b",            provider: "openrouter", created: 1751328000 },
   { id: "qwen/qwen3.6-max-preview",          provider: "openrouter", created: 1747267200 },
   { id: "stepfun/step-3.7-flash",            provider: "openrouter", created: 1748390400 },
+  { id: "moonshotai/kimi-k2.7-code",         provider: "openrouter", created: 1749600000 },
   { id: "moonshotai/kimi-k2.6",              provider: "openrouter", created: 1747267200 },
   { id: "z-ai/glm-5.1",                      provider: "openrouter", created: 1747267200 },
   { id: "google/gemini-3.5-flash",            provider: "openrouter", created: 1753747200 },
