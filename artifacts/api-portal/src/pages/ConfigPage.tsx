@@ -112,6 +112,7 @@ export default function ConfigPage() {
   // Disabled upstream nodes re-enable state.
   const [reEnablingUrl, setReEnablingUrl] = useState<string | null>(null);
   const [reEnableErr, setReEnableErr] = useState<string>("");
+  const [reEnablingAll, setReEnablingAll] = useState(false);
 
   // Cooldowns state (nodeUrl → remaining ms)
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
@@ -412,6 +413,24 @@ export default function ConfigPage() {
       setReEnableErr(String(e));
     } finally {
       setReEnablingUrl(null);
+    }
+  }
+
+  async function handleReEnableAll() {
+    if (!settings) return;
+    const nonDevNodes = settings.disabledUpstreamNodes.filter(
+      (n: DisabledUpstreamNode) => n.type !== "replit-dev",
+    );
+    if (nonDevNodes.length === 0) return;
+    setReEnablingAll(true);
+    setReEnableErr("");
+    try {
+      await Promise.all(nonDevNodes.map((n: DisabledUpstreamNode) => reEnableUpstreamNode(n.url)));
+      await refreshAll();
+    } catch (e) {
+      setReEnableErr(String(e));
+    } finally {
+      setReEnablingAll(false);
     }
   }
 
@@ -815,6 +834,16 @@ export default function ConfigPage() {
                 以下节点因出错被自动屏蔽。可点击"重新启用"将其恢复至代理池。
               </p>
             </div>
+            {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.type !== "replit-dev") && (
+              <button
+                type="button"
+                disabled={reEnablingAll || reEnablingUrl !== null}
+                onClick={handleReEnableAll}
+                className="shrink-0 rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+              >
+                {reEnablingAll ? "处理中..." : "全部重新启用"}
+              </button>
+            )}
           </div>
 
           {/* Collapsible header for disabled nodes */}
