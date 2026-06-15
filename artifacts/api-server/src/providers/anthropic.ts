@@ -24,6 +24,7 @@ interface AnthropicContentBlock {
   thinking?: string;
   tool_use_id?: string;
   content?: string | AnthropicContentBlock[];
+  cache_control?: { type: "ephemeral" } | null;
 }
 
 interface AnthropicTool {
@@ -32,26 +33,114 @@ interface AnthropicTool {
   input_schema: Record<string, unknown>;
 }
 
+type AnthropicSystemBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
+
+// Anthropic allows at most 4 cache_control blocks per request.
+const MAX_CACHE_CONTROL_BLOCKS = 4;
+
+// Extract cache_control from a raw content part (client may send it on the part object).
+function extractCacheControl(
+  raw: unknown,
+): { type: "ephemeral" } | undefined {
+  if (raw && typeof raw === "object") {
+    const cc = (raw as Record<string, unknown>).cache_control;
+    if (cc && typeof cc === "object" && (cc as Record<string, unknown>).type === "ephemeral") {
+      return { type: "ephemeral" };
+    }
+  }
+  return undefined;
+}
+
+// After building all blocks, enforce the Anthropic limit of MAX_CACHE_CONTROL_BLOCKS.
+// Collect every block that has cache_control set, then strip it from all but the last N.
+function enforceMaxCacheControlBlocks(
+  system: string | AnthropicSystemBlock[] | undefined,
+  msgs: AnthropicMessage[],
+): void {
+  // Gather all mutable references to blocks that currently carry cache_control.
+  const tagged: AnthropicContentBlock[] = [];
+  const taggedSystem: AnthropicSystemBlock[] = [];
+
+  if (Array.isArray(system)) {
+    for (const b of system) {
+      if (b.cache_control) taggedSystem.push(b);
+    }
+  }
+
+  for (const msg of msgs) {
+    if (Array.isArray(msg.content)) {
+      for (const b of msg.content) {
+        if (b.cache_control) tagged.push(b);
+      }
+    }
+  }
+
+  const allTagged: Array<AnthropicContentBlock | AnthropicSystemBlock> = [...taggedSystem, ...tagged];
+  const excess = allTagged.length - MAX_CACHE_CONTROL_BLOCKS;
+  if (excess > 0) {
+    // Remove cache_control from the oldest (first) blocks that exceed the limit.
+    for (let i = 0; i < excess; i++) {
+      allTagged[i].cache_control = undefined;
+    }
+  }
+}
+
 function convertMessagesToAnthropic(messages: Message[]): {
-  system: string | undefined;
+  system: string | AnthropicSystemBlock[] | undefined;
   msgs: AnthropicMessage[];
 } {
-  let system: string | undefined;
+  let system: string | AnthropicSystemBlock[] | undefined;
   const msgs: AnthropicMessage[] = [];
 
   for (const m of messages) {
     if (m.role === "system") {
-      system = typeof m.content === "string" ? m.content : "";
+      if (typeof m.content === "string") {
+        system = m.content;
+      } else if (Array.isArray(m.content)) {
+        // Preserve cache_control on system content blocks if present.
+        const blocks: AnthropicSystemBlock[] = (m.content as unknown[]).map((raw) => {
+          const p = raw as Record<string, unknown>;
+          const text = typeof p.text === "string" ? p.text : "";
+          const cc = extractCacheControl(raw);
+          return cc ? { type: "text", text, cache_control: cc } : { type: "text", text };
+        });
+        // If any block has cache_control, use array form; otherwise fall back to joined string.
+        if (blocks.some((b) => b.cache_control)) {
+          system = blocks;
+        } else {
+          system = blocks.map((b) => b.text).join("");
+        }
+      } else {
+        system = "";
+      }
       continue;
     }
+
     if (m.role === "user") {
-      const content =
-        typeof m.content === "string"
-          ? m.content
-          : (m.content ?? [])
-              .map((p) => (p.type === "text" ? p.text ?? "" : ""))
-              .join("");
-      msgs.push({ role: "user", content });
+      if (typeof m.content === "string") {
+        msgs.push({ role: "user", content: m.content });
+      } else {
+        const rawParts = (m.content ?? []) as unknown[];
+        const blocks: AnthropicContentBlock[] = rawParts.map((raw) => {
+          const p = raw as Record<string, unknown>;
+          const cc = extractCacheControl(raw);
+          const block: AnthropicContentBlock = {
+            type: "text",
+            text: typeof p.text === "string" ? p.text : "",
+          };
+          if (cc) block.cache_control = cc;
+          return block;
+        });
+        // Use array form to preserve cache_control; collapse to string if no cache_control and single block.
+        const hasCache = blocks.some((b) => b.cache_control);
+        if (!hasCache && blocks.length === 1) {
+          msgs.push({ role: "user", content: blocks[0].text ?? "" });
+        } else if (!hasCache) {
+          msgs.push({ role: "user", content: blocks.map((b) => b.text ?? "").join("") });
+        } else {
+          msgs.push({ role: "user", content: blocks });
+        }
+      }
     } else if (m.role === "assistant") {
       if (m.tool_calls && m.tool_calls.length > 0) {
         const blocks: AnthropicContentBlock[] = [];
@@ -88,6 +177,9 @@ function convertMessagesToAnthropic(messages: Message[]): {
       msgs.push({ role: "user", content: [resultBlock] });
     }
   }
+
+  // Enforce Anthropic's 4-block cache_control limit after all messages are collected.
+  enforceMaxCacheControlBlocks(system, msgs);
 
   return { system, msgs };
 }
