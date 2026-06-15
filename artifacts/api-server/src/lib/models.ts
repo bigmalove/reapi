@@ -134,6 +134,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "gemini-2.5-flash-lite",                     provider: "gemini", created: 1751328000 },
 
   // ── OpenRouter Featured ───────────────────────────────────────────────────
+  { id: "openrouter/fusion",                 provider: "openrouter", created: 1750032000 },
   { id: "x-ai/grok-4.20",                   provider: "openrouter", created: 1753142400 },
   { id: "x-ai/grok-4.1-fast",               provider: "openrouter", created: 1751328000 },
   { id: "x-ai/grok-4-fast",                 provider: "openrouter", created: 1748995200 },
