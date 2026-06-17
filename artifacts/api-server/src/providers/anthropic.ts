@@ -573,7 +573,7 @@ function convertAnthropicEventToChunk(
             },
             finish_reason: null,
           },
-        ],
+        ]，
       };
     }
   }
