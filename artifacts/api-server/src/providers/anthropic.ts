@@ -123,22 +123,17 @@ function convertMessagesToAnthropic(messages: Message[]): {
         const rawParts = (m.content ?? []) as unknown[];
         const blocks: AnthropicContentBlock[] = rawParts.map((raw) => {
           const p = raw as Record<string, unknown>;
-          const cc = extractCacheControl(raw);
-          const block: AnthropicContentBlock = {
+          // Do NOT preserve client-sent cache_control on individual user blocks.
+          // We will add cache_control only to the last user message after all messages are built.
+          return {
             type: "text",
             text: typeof p.text === "string" ? p.text : "",
           };
-          if (cc) block.cache_control = cc;
-          return block;
         });
-        // Use array form to preserve cache_control; collapse to string if no cache_control and single block.
-        const hasCache = blocks.some((b) => b.cache_control);
-        if (!hasCache && blocks.length === 1) {
+        if (blocks.length === 1) {
           msgs.push({ role: "user", content: blocks[0].text ?? "" });
-        } else if (!hasCache) {
-          msgs.push({ role: "user", content: blocks.map((b) => b.text ?? "").join("") });
         } else {
-          msgs.push({ role: "user", content: blocks });
+          msgs.push({ role: "user", content: blocks.map((b) => b.text ?? "").join("") });
         }
       }
     } else if (m.role === "assistant") {
@@ -175,6 +170,30 @@ function convertMessagesToAnthropic(messages: Message[]): {
         content: typeof m.content === "string" ? m.content : "",
       };
       msgs.push({ role: "user", content: [resultBlock] });
+    }
+  }
+
+  // Anthropic recommends caching only at the latest conversation turn.
+  // Find the last user message and add cache_control to its last text block.
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const msg = msgs[i];
+    if (msg.role === "user") {
+      if (typeof msg.content === "string") {
+        // Upgrade to array form so we can attach cache_control.
+        msgs[i] = {
+          role: "user",
+          content: [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }],
+        };
+      } else if (Array.isArray(msg.content)) {
+        // Add cache_control to the last text block in this message.
+        for (let j = msg.content.length - 1; j >= 0; j--) {
+          if (msg.content[j].type === "text") {
+            msg.content[j].cache_control = { type: "ephemeral" };
+            break;
+          }
+        }
+      }
+      break;
     }
   }
 
@@ -573,7 +592,7 @@ function convertAnthropicEventToChunk(
             },
             finish_reason: null,
           },
-        ]，
+        ],
       };
     }
   }
