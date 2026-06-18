@@ -318,13 +318,17 @@ export async function callAnthropic(
 
   const { system, msgs } = convertMessagesToAnthropic(request.messages);
 
-  // Models using adaptive thinking API (effort-based); all others use legacy budget_tokens
-  const ADAPTIVE_THINKING_MODELS = new Set([
+  // Models using adaptive thinking API (effort-based); all others use legacy budget_tokens.
+  // Match by prefix to handle date-versioned IDs like claude-opus-4-7-20250514.
+  const ADAPTIVE_THINKING_PREFIXES = [
+    "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-fable-5",
-  ]);
-  const usesAdaptiveThinking = ADAPTIVE_THINKING_MODELS.has(actualModel);
+  ];
+  const usesAdaptiveThinking = ADAPTIVE_THINKING_PREFIXES.some(
+    (prefix) => actualModel === prefix || actualModel.startsWith(`${prefix}-`),
+  );
 
   // Anthropic requires budget_tokens >= 1024; ensure max_tokens is high enough.
   const requestedMax = request.max_tokens ?? (thinkingEnabled ? 16000 : 4096);
