@@ -134,6 +134,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "gemini-2.5-flash-lite",                     provider: "gemini", created: 1751328000 },
 
   // ── OpenRouter Featured ───────────────────────────────────────────────────
+  { id: "sakana/fugu-ultra",                 provider: "openrouter", created: 1750377600 },
   { id: "openrouter/fusion",                 provider: "openrouter", created: 1750032000 },
   { id: "x-ai/grok-4.20",                   provider: "openrouter", created: 1753142400 },
   { id: "x-ai/grok-4.1-fast",               provider: "openrouter", created: 1751328000 },
@@ -259,6 +260,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "cohere/command-a",                       provider: "openrouter", created: 1741392000 },
   { id: "amazon/nova-premier-v1",            provider: "openrouter", created: 1744934400 },
   { id: "baidu/ernie-4.5-300b-a47b",         provider: "openrouter", created: 1744934400 },
+  { id: "openai/gpt-image-2",                provider: "openrouter", created: 1745280000 },
   { id: "openai/gpt-5.4-image-2",            provider: "openrouter", created: 1751328000 },
   { id: "bytedance-seed/seedream-4.5",       provider: "openrouter", created: 1747180800 },
   { id: "bytedance/seedance-2.0",            provider: "openrouter", created: 1747180800 },
