@@ -8,6 +8,7 @@ const router = Router();
 
 // Models that support image generation via OpenRouter
 const IMAGE_MODELS = new Set([
+  "openai/gpt-image-2",
   "openai/gpt-5.4-image-2",
   "bytedance-seed/seedream-4.5",
 ]);
