@@ -81,10 +81,12 @@ export async function callOpenRouter(
   // Models using adaptive thinking API (effort-based) via OpenRouter/Bedrock
   // actualModel is the resolved OpenRouter model ID (after Bedrock alias lookup)
   const ADAPTIVE_THINKING_MODELS = new Set([
+    "anthropic/claude-opus-5",
     "anthropic/claude-opus-4.7",
     "anthropic/claude-opus-4.8",
     "anthropic/claude-fable-5",
     "anthropic/claude-fable-latest",
+    "anthropic/claude-sonnet-5",
   ]);
   const usesAdaptiveThinking = ADAPTIVE_THINKING_MODELS.has(actualModel);
 
@@ -94,10 +96,10 @@ export async function callOpenRouter(
     model: actualModel,
   };
 
-  // Force AWS Bedrock for all Claude models
+  // Force AWS Bedrock's Claude-on-AWS channel for all Claude models.
   if (isClaude) {
     body["provider"] = {
-      order: ["amazon-bedrock"],
+      order: ["amazon-bedrock/claude-on-aws"],
       allow_fallbacks: false,
     };
   }
@@ -106,6 +108,22 @@ export async function callOpenRouter(
   if (actualModel === "deepseek/deepseek-v4-pro") {
     body["provider"] = {
       order: ["deepseek"],
+      allow_fallbacks: false,
+    };
+  }
+
+  // Force Tencent provider channel for hy3
+  if (actualModel === "tencent/hy3") {
+    body["provider"] = {
+      order: ["tencent"],
+      allow_fallbacks: false,
+    };
+  }
+
+  // Force Fireworks fast endpoint for GLM-5.2
+  if (actualModel === "z-ai/glm-5.2") {
+    body["provider"] = {
+      order: ["fireworks/fast"],
       allow_fallbacks: false,
     };
   }
