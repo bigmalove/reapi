@@ -35,53 +35,53 @@ interface AnthropicTool {
 
 type AnthropicSystemBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
 
-// Anthropic allows at most 4 cache_control blocks per request.
-const MAX_CACHE_CONTROL_BLOCKS = 4;
+function tagMessageForCache(message: AnthropicMessage): void {
+  if (typeof message.content === "string") {
+    message.content = [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }];
+    return;
+  }
 
-// Extract cache_control from a raw content part (client may send it on the part object).
-function extractCacheControl(
-  raw: unknown,
-): { type: "ephemeral" } | undefined {
-  if (raw && typeof raw === "object") {
-    const cc = (raw as Record<string, unknown>).cache_control;
-    if (cc && typeof cc === "object" && (cc as Record<string, unknown>).type === "ephemeral") {
-      return { type: "ephemeral" };
+  for (let i = message.content.length - 1; i >= 0; i--) {
+    if (message.content[i].type === "text") {
+      message.content[i].cache_control = { type: "ephemeral" };
+      return;
     }
   }
-  return undefined;
 }
 
-// After building all blocks, enforce the Anthropic limit of MAX_CACHE_CONTROL_BLOCKS.
-// Collect every block that has cache_control set, then strip it from all but the last N.
-function enforceMaxCacheControlBlocks(
+/**
+ * Add Anthropic's four cache breakpoints to stable conversation prefixes:
+ * the final system message, the penultimate and final assistant messages,
+ * and the final conversation message. Earlier client markers are discarded
+ * so the cache layout stays deterministic and never exceeds Anthropic's
+ * four-block limit.
+ */
+function applyConversationCacheBreakpoints(
   system: string | AnthropicSystemBlock[] | undefined,
   msgs: AnthropicMessage[],
 ): void {
-  // Gather all mutable references to blocks that currently carry cache_control.
-  const tagged: AnthropicContentBlock[] = [];
-  const taggedSystem: AnthropicSystemBlock[] = [];
+  const tagged = new Set<AnthropicMessage>();
 
-  if (Array.isArray(system)) {
-    for (const b of system) {
-      if (b.cache_control) taggedSystem.push(b);
-    }
+  // Breakpoint 1: end of the system prefix.
+  if (Array.isArray(system) && system.length > 0) {
+    system[system.length - 1].cache_control = { type: "ephemeral" };
   }
 
-  for (const msg of msgs) {
-    if (Array.isArray(msg.content)) {
-      for (const b of msg.content) {
-        if (b.cache_control) tagged.push(b);
-      }
-    }
+  const assistantIndexes = msgs
+    .map((message, index) => (message.role === "assistant" ? index : -1))
+    .filter((index) => index !== -1);
+
+  // Breakpoints 2 and 3: the last two assistant turns.
+  for (const index of assistantIndexes.slice(-2)) {
+    const message = msgs[index]!;
+    tagMessageForCache(message);
+    tagged.add(message);
   }
 
-  const allTagged: Array<AnthropicContentBlock | AnthropicSystemBlock> = [...taggedSystem, ...tagged];
-  const excess = allTagged.length - MAX_CACHE_CONTROL_BLOCKS;
-  if (excess > 0) {
-    // Remove cache_control from the oldest (first) blocks that exceed the limit.
-    for (let i = 0; i < excess; i++) {
-      allTagged[i].cache_control = undefined;
-    }
+  // Breakpoint 4: the final message, unless it is already an assistant breakpoint.
+  const lastMessage = msgs.at(-1);
+  if (lastMessage && !tagged.has(lastMessage)) {
+    tagMessageForCache(lastMessage);
   }
 }
 
@@ -97,19 +97,12 @@ function convertMessagesToAnthropic(messages: Message[]): {
       if (typeof m.content === "string") {
         system = m.content;
       } else if (Array.isArray(m.content)) {
-        // Preserve cache_control on system content blocks if present.
         const blocks: AnthropicSystemBlock[] = (m.content as unknown[]).map((raw) => {
           const p = raw as Record<string, unknown>;
           const text = typeof p.text === "string" ? p.text : "";
-          const cc = extractCacheControl(raw);
-          return cc ? { type: "text", text, cache_control: cc } : { type: "text", text };
+          return { type: "text", text };
         });
-        // If any block has cache_control, use array form; otherwise fall back to joined string.
-        if (blocks.some((b) => b.cache_control)) {
-          system = blocks;
-        } else {
-          system = blocks.map((b) => b.text).join("");
-        }
+        system = blocks;
       } else {
         system = "";
       }
@@ -123,8 +116,6 @@ function convertMessagesToAnthropic(messages: Message[]): {
         const rawParts = (m.content ?? []) as unknown[];
         const blocks: AnthropicContentBlock[] = rawParts.map((raw) => {
           const p = raw as Record<string, unknown>;
-          // Do NOT preserve client-sent cache_control on individual user blocks.
-          // We will add cache_control only to the last user message after all messages are built.
           return {
             type: "text",
             text: typeof p.text === "string" ? p.text : "",
@@ -173,32 +164,7 @@ function convertMessagesToAnthropic(messages: Message[]): {
     }
   }
 
-  // Anthropic recommends caching only at the latest conversation turn.
-  // Find the last user message and add cache_control to its last text block.
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const msg = msgs[i];
-    if (msg.role === "user") {
-      if (typeof msg.content === "string") {
-        // Upgrade to array form so we can attach cache_control.
-        msgs[i] = {
-          role: "user",
-          content: [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }],
-        };
-      } else if (Array.isArray(msg.content)) {
-        // Add cache_control to the last text block in this message.
-        for (let j = msg.content.length - 1; j >= 0; j--) {
-          if (msg.content[j].type === "text") {
-            msg.content[j].cache_control = { type: "ephemeral" };
-            break;
-          }
-        }
-      }
-      break;
-    }
-  }
-
-  // Enforce Anthropic's 4-block cache_control limit after all messages are collected.
-  enforceMaxCacheControlBlocks(system, msgs);
+  applyConversationCacheBreakpoints(system, msgs);
 
   return { system, msgs };
 }
@@ -321,10 +287,12 @@ export async function callAnthropic(
   // Models using adaptive thinking API (effort-based); all others use legacy budget_tokens.
   // Match by prefix to handle date-versioned IDs like claude-opus-4-7-20250514.
   const ADAPTIVE_THINKING_PREFIXES = [
+    "claude-opus-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-fable-5",
+    "claude-sonnet-5",
   ];
   const usesAdaptiveThinking = ADAPTIVE_THINKING_PREFIXES.some(
     (prefix) => actualModel === prefix || actualModel.startsWith(`${prefix}-`),
