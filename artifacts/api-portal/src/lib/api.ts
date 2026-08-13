@@ -77,11 +77,43 @@ export interface ModelEntry {
   owned_by: string;
   provider: string;
   disabled: boolean;
+  /** True for models the operator added at runtime — those can be deleted. */
+  custom?: boolean;
 }
 
 export interface ModelsResponse {
   object: string;
   data: ModelEntry[];
+}
+
+export type CatalogSource = "openrouter-public" | "gateway-upstream";
+
+export interface OpenRouterCatalogEntry {
+  id: string;
+  name: string;
+  created: number;
+  description?: string;
+  contextLength: number | null;
+  promptPrice: string | null;
+  completionPrice: string | null;
+  modality: string | null;
+  /** Already present in the gateway registry (built-in or previously added). */
+  existing: boolean;
+}
+
+export interface OpenRouterCatalogResponse {
+  object: string;
+  source: CatalogSource;
+  fetched_at: number;
+  data: OpenRouterCatalogEntry[];
+}
+
+export type AddModelSkipReason = "invalid-id" | "builtin" | "already-added" | "limit-reached";
+
+export interface AddModelsResult {
+  ok: boolean;
+  added: Array<{ id: string; provider: string; created: number }>;
+  skipped: Array<{ id: string; reason: AddModelSkipReason }>;
 }
 
 function safeLocalStorage() {
@@ -203,6 +235,46 @@ export async function patchProviderModels(provider: string, all_disabled: boolea
     body: JSON.stringify({ provider, all_disabled }),
   });
   if (!res.ok) throw new Error(await res.text());
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text)?.error?.message ?? text;
+  } catch {
+    return text;
+  }
+}
+
+/** Pull the live OpenRouter model catalog. `refresh` bypasses the server cache. */
+export async function fetchOpenRouterCatalog(refresh = false): Promise<OpenRouterCatalogResponse> {
+  const res = await fetch(`${V1_BASE}/admin/openrouter/models${refresh ? "?refresh=1" : ""}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
+export async function addModels(
+  models: Array<{ id: string; created?: number }>,
+  provider = "openrouter",
+): Promise<AddModelsResult> {
+  const res = await fetch(`${V1_BASE}/admin/models`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ provider, models }),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
+export async function deleteModel(id: string): Promise<void> {
+  const res = await fetch(`${V1_BASE}/admin/models`, {
+    method: "DELETE",
+    headers: authHeaders(),
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
 }
 
 export async function reEnableUpstreamNode(url: string): Promise<void> {

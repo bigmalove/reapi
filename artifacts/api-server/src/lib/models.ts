@@ -2,6 +2,8 @@ import { readJsonAsync, writeJson } from "./persist.js";
 
 export type Provider = "openai" | "anthropic" | "gemini" | "openrouter";
 
+export const PROVIDERS: Provider[] = ["openai", "anthropic", "gemini", "openrouter"];
+
 export interface ModelEntry {
   id: string;
   provider: Provider;
@@ -320,22 +322,67 @@ export const MODEL_REGISTRY: ModelEntry[] = [
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
 
+const DISABLED_MODELS_KEY = "disabled_models.json";
+const CUSTOM_MODELS_KEY = "custom_models.json";
+
+/** Upper bound on one add request, so a bad client can't blow up the kv row. */
+export const MAX_CUSTOM_MODELS = 2000;
+
+const BUILTIN_IDS = new Set(MODEL_REGISTRY.map((m) => m.id));
+
 export function getDefaultModel(): string {
   return DEFAULT_MODEL;
 }
 
 export function resolveProvider(modelId: string): Provider | null {
-  const entry = MODEL_REGISTRY.find((m) => m.id === modelId);
+  const entry = getModelRegistry().find((m) => m.id === modelId);
   if (entry) return entry.provider;
   if (modelId.includes("/")) return "openrouter";
   return null;
 }
 
 let _disabledModels: Set<string> | null = null;
+let _customModels: ModelEntry[] | null = null;
+
+function isProvider(value: unknown): value is Provider {
+  return typeof value === "string" && (PROVIDERS as string[]).includes(value);
+}
+
+/** Coerce a persisted / client-supplied entry into a ModelEntry, or drop it. */
+function sanitizeCustomModel(raw: unknown): ModelEntry | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const rec = raw as Record<string, unknown>;
+  const id = typeof rec["id"] === "string" ? rec["id"].trim() : "";
+  if (!id || id.length > 200) return null;
+  const created = typeof rec["created"] === "number" && Number.isFinite(rec["created"])
+    ? Math.trunc(rec["created"])
+    : 0;
+  return {
+    id,
+    provider: isProvider(rec["provider"]) ? rec["provider"] : "openrouter",
+    created,
+  };
+}
 
 export async function initModels(): Promise<void> {
-  const arr = await readJsonAsync<string[]>("disabled_models.json", []);
-  _disabledModels = new Set(arr);
+  const [disabled, custom] = await Promise.all([
+    readJsonAsync<unknown>(DISABLED_MODELS_KEY, []),
+    readJsonAsync<unknown>(CUSTOM_MODELS_KEY, []),
+  ]);
+
+  _disabledModels = new Set(
+    Array.isArray(disabled) ? disabled.filter((id): id is string => typeof id === "string") : [],
+  );
+
+  const seen = new Set<string>();
+  _customModels = (Array.isArray(custom) ? custom : [])
+    .map(sanitizeCustomModel)
+    .filter((m): m is ModelEntry => {
+      // Drop anything that has since been promoted into the built-in registry.
+      if (m === null || BUILTIN_IDS.has(m.id) || seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
+    });
 }
 
 function loadDisabledModels(): Set<string> {
@@ -343,6 +390,98 @@ function loadDisabledModels(): Set<string> {
     _disabledModels = new Set();
   }
   return _disabledModels;
+}
+
+function loadCustomModels(): ModelEntry[] {
+  if (_customModels === null) {
+    _customModels = [];
+  }
+  return _customModels;
+}
+
+/** Models the operator added at runtime (e.g. pulled from OpenRouter). */
+export function getCustomModels(): ModelEntry[] {
+  return loadCustomModels().map((m) => ({ ...m }));
+}
+
+/** Built-in registry plus operator-added models. */
+export function getModelRegistry(): ModelEntry[] {
+  return [...MODEL_REGISTRY, ...loadCustomModels()];
+}
+
+export type SkipReason = "invalid-id" | "builtin" | "already-added" | "limit-reached";
+
+export interface AddCustomModelsResult {
+  added: ModelEntry[];
+  skipped: Array<{ id: string; reason: SkipReason }>;
+}
+
+/**
+ * Add models to the registry. Adding also clears the id from the disabled set,
+ * so a freshly added model is immediately visible on `/v1/models`.
+ */
+export function addCustomModels(
+  inputs: Array<{ id?: unknown; provider?: unknown; created?: unknown }>,
+): AddCustomModelsResult {
+  const custom = loadCustomModels();
+  const existing = new Set(custom.map((m) => m.id));
+  const disabled = loadDisabledModels();
+
+  const added: ModelEntry[] = [];
+  const skipped: AddCustomModelsResult["skipped"] = [];
+
+  for (const input of inputs) {
+    const entry = sanitizeCustomModel(input);
+    const rawId = typeof input.id === "string" ? input.id.trim() : "";
+    if (entry === null) {
+      skipped.push({ id: rawId, reason: "invalid-id" });
+      continue;
+    }
+    if (BUILTIN_IDS.has(entry.id)) {
+      skipped.push({ id: entry.id, reason: "builtin" });
+      continue;
+    }
+    if (existing.has(entry.id)) {
+      skipped.push({ id: entry.id, reason: "already-added" });
+      continue;
+    }
+    if (custom.length >= MAX_CUSTOM_MODELS) {
+      skipped.push({ id: entry.id, reason: "limit-reached" });
+      continue;
+    }
+    custom.push(entry);
+    existing.add(entry.id);
+    disabled.delete(entry.id);
+    added.push(entry);
+  }
+
+  if (added.length > 0) {
+    _customModels = custom;
+    _disabledModels = disabled;
+    writeJson(CUSTOM_MODELS_KEY, custom);
+    writeJson(DISABLED_MODELS_KEY, Array.from(disabled));
+  }
+
+  return { added, skipped };
+}
+
+/** Remove an operator-added model. Built-in models can only be disabled. */
+export function removeCustomModel(id: string): boolean {
+  const custom = loadCustomModels();
+  const idx = custom.findIndex((m) => m.id === id);
+  if (idx === -1) return false;
+
+  custom.splice(idx, 1);
+  _customModels = custom;
+  writeJson(CUSTOM_MODELS_KEY, custom);
+
+  // Don't leave a stale disable flag behind for a later re-add.
+  const disabled = loadDisabledModels();
+  if (disabled.delete(id)) {
+    _disabledModels = disabled;
+    writeJson(DISABLED_MODELS_KEY, Array.from(disabled));
+  }
+  return true;
 }
 
 export function getDisabledModels(): string[] {
@@ -355,7 +494,7 @@ export function isModelDisabled(id: string): boolean {
 
 export function setDisabledModels(ids: string[]): void {
   _disabledModels = new Set(ids);
-  writeJson("disabled_models.json", ids);
+  writeJson(DISABLED_MODELS_KEY, ids);
 }
 
 export function patchModelDisabled(id: string, disabled: boolean): void {
@@ -366,15 +505,22 @@ export function patchModelDisabled(id: string, disabled: boolean): void {
     set.delete(id);
   }
   _disabledModels = set;
-  writeJson("disabled_models.json", Array.from(set));
+  writeJson(DISABLED_MODELS_KEY, Array.from(set));
 }
 
 export function getEnabledModels(): ModelEntry[] {
   const disabled = loadDisabledModels();
-  return MODEL_REGISTRY.filter((m) => !disabled.has(m.id));
+  return getModelRegistry().filter((m) => !disabled.has(m.id));
 }
 
-export function getAllModelsWithStatus(): Array<ModelEntry & { disabled: boolean }> {
+export function getAllModelsWithStatus(): Array<
+  ModelEntry & { disabled: boolean; custom: boolean }
+> {
   const disabled = loadDisabledModels();
-  return MODEL_REGISTRY.map((m) => ({ ...m, disabled: disabled.has(m.id) }));
+  const customIds = new Set(loadCustomModels().map((m) => m.id));
+  return getModelRegistry().map((m) => ({
+    ...m,
+    disabled: disabled.has(m.id),
+    custom: customIds.has(m.id),
+  }));
 }

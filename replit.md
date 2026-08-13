@@ -40,8 +40,11 @@ Two artifacts in a pnpm monorepo:
 | POST | /api/upstream-nodes/re-enable | Re-enable a disabled upstream node |
 | GET | /v1/models | List enabled models (OpenAI compatible) |
 | POST | /v1/chat/completions | Chat completion (core endpoint) |
-| GET | /v1/admin/models | List all models with status |
+| GET | /v1/admin/models | List all models with status (`custom: true` = operator-added) |
 | PATCH | /v1/admin/models | Enable/disable models |
+| GET | /v1/admin/openrouter/models | Remote OpenRouter catalog (`?refresh=1` bypasses cache) |
+| POST | /v1/admin/models | Add models to the registry (`{ids: []}` or `{models: [{id, created}]}`) |
+| DELETE | /v1/admin/models | Remove an operator-added model (`{id}`) |
 
 ## Environment Variables (Replit AI Integrations — auto-provisioned)
 
@@ -85,6 +88,25 @@ The Replit AI Integration proxy passes through the `provider` field for some sou
 
 Default model: `gpt-4.1-mini`
 
+### Adding OpenRouter models at runtime
+
+`artifacts/api-server/src/lib/models.ts` holds a hard-coded `MODEL_REGISTRY`, plus an
+operator-managed list persisted under the `custom_models.json` kv key. The effective
+registry is `MODEL_REGISTRY + custom models` (`getModelRegistry()`).
+
+The admin portal → Model Management → "添加 OpenRouter 模型" panel pulls the live
+catalog and lets the operator pick which models to add:
+
+- `artifacts/api-server/src/lib/openrouterCatalog.ts` fetches `https://openrouter.ai/api/v1/models`
+  (public, no key), cached 5 minutes, shared across concurrent callers. If that host is
+  unreachable it falls back to `<configured openrouter baseUrl>/models`; if both fail a
+  stale cache is served rather than an error. The response reports which `source` was used.
+- Added models are stored with `provider: "openrouter"` and are deletable from the portal.
+  Built-in models can only be disabled, never deleted (DELETE returns 404 for them).
+- Adding an id clears it from `disabled_models.json`, so a freshly added model shows up on
+  `/v1/models` immediately.
+- Cap: `MAX_CUSTOM_MODELS` (2000) total, 500 ids per POST.
+
 ## Reverse-Proxy Forwarding Mode
 
 The gateway can forward all 4 providers to a **pool** of one or more remote upstream gateways instead of using this Repl's local Replit AI Integration keys. Configure in admin portal → Configuration → "Upstream Reverse Proxy Pool".
@@ -125,6 +147,7 @@ CREATE TABLE IF NOT EXISTS kv_store (
 Keys stored:
 - `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyMode, reverseProxyPool[], disabledUpstreamNodes[], providerOverrides)
 - `disabled_models.json` — list of disabled model IDs
+- `custom_models.json` — operator-added models (`{id, provider, created}`), e.g. pulled from OpenRouter
 
 On startup, `initSettings()` and `initModels()` load from the database into an in-memory cache. All writes go to the database immediately via `writeJsonAsync`. Data survives restarts and deployments.
 
@@ -135,6 +158,7 @@ On startup, `initSettings()` and `initModels()` load from the database into an i
 - Tool calling / function calling for all providers
 - SillyTavern mode (appends "继续" to Claude requests without tools)
 - Model enable/disable management
+- Add OpenRouter models by pulling the live remote catalog and picking from it
 - PostgreSQL 16 persistence — settings and node state survive restarts
 - Disabled upstream node management — re-enable auto-blocked nodes from the portal
 
@@ -142,5 +166,6 @@ On startup, `initSettings()` and `initModels()` load from the database into an i
 
 3 tabs:
 1. **Configuration** — Base URL, gateway API key, provider status, SillyTavern toggle
-2. **Model Management** — Per-provider enable/disable with bulk controls
+2. **Model Management** — Per-provider enable/disable with bulk controls, plus an
+   "添加 OpenRouter 模型" panel (remote catalog → search → multi-select → add / delete)
 3. **API Docs** — Authentication, endpoint reference, code examples

@@ -207,6 +207,9 @@ for chunk in stream:
                 ["POST", "/v1/chat/completions", "对话补全(核心接口)"],
                 ["GET", "/v1/admin/models", "列出全部模型及其状态"],
                 ["PATCH", "/v1/admin/models", "启用/禁用模型"],
+                ["GET", "/v1/admin/openrouter/models", "远程拉取 OpenRouter 最新模型目录"],
+                ["POST", "/v1/admin/models", "把模型加入模型列表"],
+                ["DELETE", "/v1/admin/models", "移除手动添加的模型"],
               ].map(([method, path, desc]) => (
                 <tr key={path + method}>
                   <td className="py-2 pr-4">
@@ -216,6 +219,8 @@ for chunk in stream:
                           ? "bg-blue-500/10 text-blue-400"
                           : method === "POST"
                           ? "bg-green-500/10 text-green-400"
+                          : method === "DELETE"
+                          ? "bg-red-500/10 text-red-400"
                           : "bg-yellow-500/10 text-yellow-400"
                       }`}
                     >

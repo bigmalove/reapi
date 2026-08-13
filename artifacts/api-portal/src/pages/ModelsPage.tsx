@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import { fetchAdminModels, patchModel, patchProviderModels, type ModelEntry } from "../lib/api";
+import {
+  deleteModel,
+  fetchAdminModels,
+  patchModel,
+  patchProviderModels,
+  type ModelEntry,
+} from "../lib/api";
+import OpenRouterCatalogPanel from "../components/OpenRouterCatalogPanel";
 
 const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
@@ -46,9 +53,11 @@ export default function ModelsPage() {
   const [error, setError] = useState("");
   const [updating, setUpdating] = useState<Set<string>>(new Set());
 
-  const load = useCallback(async () => {
+  // `silent` refreshes keep the current view mounted — otherwise re-reading the
+  // list after an add would tear down the OpenRouter panel and its results.
+  const load = useCallback(async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       setError("");
       const res = await fetchAdminModels();
       const map = new Map<string, ModelEntry[]>();
@@ -69,7 +78,7 @@ export default function ModelsPage() {
   }, []);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   async function toggleModel(id: string, currentlyDisabled: boolean) {
@@ -81,6 +90,27 @@ export default function ModelsPage() {
           ...g,
           models: g.models.map((m) => (m.id === id ? { ...m, disabled: !currentlyDisabled } : m)),
         }))
+      );
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setUpdating((s) => {
+        const next = new Set(s);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  async function removeModel(id: string) {
+    if (!confirm(`确定从模型列表中删除「${id}」？`)) return;
+    setUpdating((s) => new Set(s).add(id));
+    try {
+      await deleteModel(id);
+      setGroups((prev) =>
+        prev
+          .map((g) => ({ ...g, models: g.models.filter((m) => m.id !== id) }))
+          .filter((g) => g.models.length > 0)
       );
     } catch (e) {
       alert(String(e));
@@ -116,7 +146,7 @@ export default function ModelsPage() {
     }
   }
 
-  if (loading) {
+  if (loading && groups.length === 0) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <span className="size-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -125,11 +155,10 @@ export default function ModelsPage() {
     );
   }
 
-  if (error) {
-    const isUnauth = error.includes("Unauthorized") || error.includes("401");
-    return (
+  const errorBanner =
+    error === "" ? null : (
       <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
-        {isUnauth ? (
+        {error.includes("Unauthorized") || error.includes("401") ? (
           <span>
             需要认证。请先在
             <strong>配置</strong>页面输入网关 API 密钥并保存，然后
@@ -137,11 +166,14 @@ export default function ModelsPage() {
         ) : (
           error
         )}
-        <button onClick={load} className="ml-3 underline text-xs">
+        <button onClick={() => void load()} className="ml-3 underline text-xs">
           重试
         </button>
       </div>
     );
+
+  if (groups.length === 0) {
+    return errorBanner ?? <p className="text-sm text-muted-foreground">暂无模型。</p>;
   }
 
   const totalEnabled = groups.reduce((acc, g) => acc + g.models.filter((m) => !m.disabled).length, 0);
@@ -155,6 +187,10 @@ export default function ModelsPage() {
           已启用 {totalEnabled} / {totalModels} 个模型。已禁用的模型不会出现在 <code className="bg-secondary/60 px-1 rounded">/v1/models</code> 中。
         </p>
       </div>
+
+      {errorBanner}
+
+      <OpenRouterCatalogPanel onAdded={() => void load(true)} />
 
       {groups.map((group) => {
         const allEnabled = group.models.every((m) => !m.disabled);
@@ -204,12 +240,30 @@ export default function ModelsPage() {
                     model.disabled ? "opacity-50" : ""
                   }`}
                 >
-                  <span className="font-mono text-sm text-foreground truncate">{model.id}</span>
-                  <Toggle
-                    enabled={!model.disabled}
-                    disabled={updating.has(model.id)}
-                    onChange={() => toggleModel(model.id, model.disabled)}
-                  />
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="font-mono text-sm text-foreground truncate">{model.id}</span>
+                    {model.custom && (
+                      <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
+                        自定义
+                      </span>
+                    )}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-3">
+                    {model.custom && (
+                      <button
+                        disabled={updating.has(model.id)}
+                        onClick={() => void removeModel(model.id)}
+                        className="text-xs text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40"
+                      >
+                        删除
+                      </button>
+                    )}
+                    <Toggle
+                      enabled={!model.disabled}
+                      disabled={updating.has(model.id)}
+                      onChange={() => toggleModel(model.id, model.disabled)}
+                    />
+                  </span>
                 </div>
               ))}
             </div>
