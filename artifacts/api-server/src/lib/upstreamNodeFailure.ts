@@ -1,4 +1,4 @@
-import { disableUpstreamNode } from "./settings.js";
+import { disableUpstreamNode, REPLIT_HOSTING_SHUTDOWN } from "./settings.js";
 import { logger } from "./logger.js";
 import { setNodeCooldown } from "./providerEndpoint.js";
 import type { ProviderEndpoint } from "./providerEndpoint.js";
@@ -72,24 +72,29 @@ export function maybeDisableSelectedNode(args: {
   if (endpoint.source !== "upstream") return;
   if (!endpoint.nodeUrl) return;
 
-  // Replit hosting shutdown page: the upstream node ran out of credits or was
-  // taken offline. The response is an HTML page containing a Replit hosting link.
-  // This can arrive on any 2xx/4xx/5xx status, so check body first.
+  // Replit hosting placeholder page ("This app isn't live yet"): the deployment
+  // is stopped, undeployed, or was never deployed, so Replit's edge serves an
+  // HTML page containing a hosting link in place of the node. This is NOT a
+  // billing failure — an account over its budget stays deployed and answers with
+  // a 403 carrying FREE_TIER_BUDGET_EXCEEDED, handled further down.
+  // Replit serves the placeholder as a 404, and every caller invokes this only
+  // for a non-ok response — but the status is not part of the match, since the
+  // page is what identifies it, not the code it happens to arrive with.
   if (responseBody.includes("replit.com/site/hosting")) {
     logger.warn(
       {
         nodeUrl: endpoint.nodeUrl,
         upstreamStatus: responseStatus,
-        message: "Replit hosting shutdown page detected",
+        message: "Replit hosting placeholder page detected",
       },
-      "upstream node returned Replit shutdown page — removing node from pool",
+      "upstream node is not deployed — removing node from pool",
     );
     disableUpstreamNode({
       url: endpoint.nodeUrl,
       disabledReason: "upstream-node-unavailable",
-      upstreamReason: "replit-hosting-shutdown",
+      upstreamReason: REPLIT_HOSTING_SHUTDOWN,
       upstreamStatus: responseStatus,
-      lastError: "Replit hosting shutdown page returned (node likely out of credits)",
+      lastError: "Replit deployment is not live (hosting placeholder page returned)",
     });
     return;
   }

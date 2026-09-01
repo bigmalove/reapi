@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { getSettings, updateSettings, type DisabledUpstreamNode, type UpstreamNodeType } from "../lib/settings.js";
+import { getSettings, updateSettings, REPLIT_HOSTING_SHUTDOWN, type DisabledUpstreamNode, type UpstreamNodeType } from "../lib/settings.js";
 import { getActiveCooldowns } from "../lib/providerEndpoint.js";
+import { logger } from "../lib/logger.js";
 
 const router = Router();
 
@@ -56,9 +57,17 @@ router.post("/api/upstream-nodes/register", (req, res) => {
   if (type === "replit-app") {
     // If this node was previously disabled due to upstream failure, do not
     // re-add it to the pool — the reapi-node auto-registration would otherwise
-    // undo the disable on every heartbeat cycle.
+    // undo the disable on every heartbeat cycle. Those nodes are still deployed
+    // and running (e.g. a 403 FREE_TIER_BUDGET_EXCEEDED), so they keep sending
+    // heartbeats while broken and a registration proves nothing.
+    //
+    // Exception: a node disabled for REPLIT_HOSTING_SHUTDOWN had no process
+    // running at all, so it could not have sent this request. Receiving one
+    // means the deployment is live again — fall through and restore it.
     const existingDisabled = settings.disabledUpstreamNodes.find((e) => e.url === rawUrl);
-    if (existingDisabled?.disabledReason === "upstream-node-unavailable") {
+    const wasShutDown = existingDisabled?.upstreamReason === REPLIT_HOSTING_SHUTDOWN;
+
+    if (existingDisabled?.disabledReason === "upstream-node-unavailable" && !wasShutDown) {
       res.json({
         registered: true,
         type: "replit-app",
@@ -66,6 +75,13 @@ router.post("/api/upstream-nodes/register", (req, res) => {
         disabledReason: "upstream-node-unavailable",
       });
       return;
+    }
+
+    if (wasShutDown) {
+      logger.info(
+        { nodeUrl: rawUrl, disabledAt: existingDisabled?.disabledAt },
+        "redeployed node re-registered after hosting shutdown — restoring to pool",
+      );
     }
 
     const alreadyInPool = settings.reverseProxyPool.some((e) => e.url === rawUrl);

@@ -20,6 +20,15 @@ export type UpstreamNodeType = "replit-app" | "replit-dev";
 
 export type DisabledReason = "requires-wakeup" | "upstream-node-unavailable";
 
+/**
+ * `upstreamReason` for a node disabled because Replit served its hosting
+ * placeholder page instead of the node app. Unlike every other disable reason,
+ * this one means no node process was running at all — so the node cannot
+ * self-register while disabled, and an incoming registration is proof that the
+ * deployment is live again.
+ */
+export const REPLIT_HOSTING_SHUTDOWN = "replit-hosting-shutdown";
+
 export interface DisabledUpstreamNode {
   url: string;
   type: UpstreamNodeType;
