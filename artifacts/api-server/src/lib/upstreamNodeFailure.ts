@@ -1,6 +1,6 @@
 import { disableUpstreamNode, REPLIT_HOSTING_SHUTDOWN } from "./settings.js";
 import { logger } from "./logger.js";
-import { setNodeCooldown } from "./providerEndpoint.js";
+import { setNodeCooldown, rotateNodeToEnd } from "./providerEndpoint.js";
 import type { ProviderEndpoint } from "./providerEndpoint.js";
 
 interface NodeDisableSignal {
@@ -194,13 +194,16 @@ export function maybeDisableSelectedNode(args: {
   }
 
   // A raw 429 from the upstream node means it is rate-limited — temporary.
-  // Apply a cooldown so round-robin skips it for a while, but do not remove it.
+  // Apply a cooldown and move the node to the end of the pool so the next
+  // node takes over (in sticky mode the pool order is what selects the node),
+  // but do not remove it.
   if (responseStatus === 429) {
     logger.warn(
       { nodeUrl: endpoint.nodeUrl },
-      "upstream node returned 429 Too Many Requests — applying cooldown",
+      "upstream node returned 429 Too Many Requests — applying cooldown and moving to end of pool",
     );
     setNodeCooldown(endpoint.nodeUrl);
+    rotateNodeToEnd(endpoint.nodeUrl);
     return;
   }
 
@@ -248,9 +251,10 @@ export function maybeDisableSelectedNode(args: {
   if (signal.action === "cooldown") {
     logger.warn(
       { nodeUrl: endpoint.nodeUrl, upstreamStatus: signal.upstreamStatus },
-      "upstream node rate-limited (wrapped 429) — applying cooldown",
+      "upstream node rate-limited (wrapped 429) — applying cooldown and moving to end of pool",
     );
     setNodeCooldown(endpoint.nodeUrl);
+    rotateNodeToEnd(endpoint.nodeUrl);
     return;
   }
 

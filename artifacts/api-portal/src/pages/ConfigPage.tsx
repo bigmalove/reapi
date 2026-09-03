@@ -570,7 +570,7 @@ export default function ConfigPage() {
             <p className="mt-1 text-xs text-muted-foreground">
               将全部 4 家服务商的请求统一转发到一个或多个远端上游网关的{" "}
               <code className="bg-secondary/60 px-1 rounded">/modelfarm/&#123;openai,anthropic,google,openrouter&#125;</code> 接口。
-              选择 <strong>轮询</strong> 可在池内循环使用,选择 <strong>固定</strong> 则始终使用第一条。
+              选择 <strong>轮询</strong> 可在池内循环使用,选择 <strong>固定</strong> 则始终使用第一条。任一节点返回 429 限速时会被移到池尾，由下一条节点接替。
             </p>
           </div>
           <button
@@ -974,7 +974,7 @@ export default function ConfigPage() {
           <div>
             <h3 className="text-sm font-semibold text-blue-400">限速冷却中的节点</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              以下节点因收到 429 限速响应正在冷却，冷却期间将自动跳过，倒计时结束后恢复参与轮询。
+              以下节点因收到 429 限速响应正在冷却，已被移到代理池末尾并由下一条节点接替；冷却期间将自动跳过，倒计时结束后恢复参与轮询。
             </p>
           </div>
           <div className="space-y-2">

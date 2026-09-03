@@ -1,4 +1,4 @@
-import { getSettings, type ProviderName, type PoolEntry } from "./settings.js";
+import { getSettings, updateSettings, type ProviderName, type PoolEntry } from "./settings.js";
 import { logger } from "./logger.js";
 
 export type { ProviderName };
@@ -71,9 +71,43 @@ export function getActiveCooldowns(): Record<string, number> {
   return result;
 }
 
+/**
+ * Move a node to the end of the pool so the next node takes its place. Used
+ * after a 429: in sticky mode this is what actually switches traffic to the
+ * next node, and in round-robin it pushes the throttled node to the back of
+ * the queue. Entries with a blank apiKey inherit pool[0]'s key, so when the
+ * head changes the inherited key is carried over to the new head.
+ */
+export function rotateNodeToEnd(nodeUrl: string): void {
+  const pool = getSettings().reverseProxyPool;
+  const idx = pool.findIndex((e) => e.url === nodeUrl);
+  if (idx < 0 || pool.length < 2 || idx === pool.length - 1) return;
+
+  const moved = pool[idx]!;
+  const rest = pool.filter((_, i) => i !== idx);
+  const defaultKey = pool[0]?.apiKey ?? "";
+  if (idx === 0 && rest[0] && !rest[0].apiKey && defaultKey) {
+    rest[0] = { ...rest[0], apiKey: defaultKey };
+  }
+
+  logger.info(
+    { nodeUrl, from: idx, to: pool.length - 1, newHead: rest[0]?.url },
+    "moving upstream node to end of pool",
+  );
+  updateSettings({ reverseProxyPool: [...rest, moved] });
+}
+
+/** Sticky mode: first node not currently cooling down, else fall back to #1. */
+function firstAvailableIndex(pool: PoolEntry[]): number {
+  for (let i = 0; i < pool.length; i++) {
+    if (!isNodeCoolingDown(pool[i]!.url)) return i;
+  }
+  return 0;
+}
+
 function pickPoolIndex(pool: PoolEntry[], mode: "round-robin" | "sticky"): number {
   if (pool.length === 0) return -1;
-  if (mode === "sticky") return 0;
+  if (mode === "sticky") return firstAvailableIndex(pool);
 
   // Build list of indices for nodes that are not currently cooling down.
   const now = Date.now();
@@ -99,7 +133,7 @@ function pickPoolIndex(pool: PoolEntry[], mode: "round-robin" | "sticky"): numbe
 export function peekNextPoolIndex(): number | null {
   const s = getSettings();
   if (!s.reverseProxyEnabled || s.reverseProxyPool.length === 0) return null;
-  if (s.reverseProxyMode === "sticky") return 0;
+  if (s.reverseProxyMode === "sticky") return firstAvailableIndex(s.reverseProxyPool);
   return rrCursor % s.reverseProxyPool.length;
 }
 
