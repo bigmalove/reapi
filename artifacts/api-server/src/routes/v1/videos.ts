@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { requireAuth } from "../../lib/auth.js";
 import { resolveProvider, isModelDisabled } from "../../lib/models.js";
 import { resolveProviderEndpoint } from "../../lib/providerEndpoint.js";
+import { maybeDisableSelectedNode } from "../../lib/upstreamNodeFailure.js";
 import type { VideoGenerationRequest, VideoGenerationResponse } from "../../types.js";
 
 const router = Router();
@@ -59,6 +60,7 @@ router.post("/v1/videos/generations", requireAuth, async (req: Request, res: Res
 
     if (!response.ok) {
       const text = await response.text();
+      maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
       req.log.error({ status: response.status, body: text }, "Video generation error");
       res.status(502).json({ error: { message: `Upstream error ${response.status}: ${text}`, type: "upstream_error" } });
       return;
@@ -95,6 +97,7 @@ router.get("/v1/videos/generations/:id", requireAuth, async (req: Request, res: 
 
     if (!response.ok) {
       const text = await response.text();
+      maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
       req.log.error({ status: response.status, body: text }, "Video status check error");
       res.status(502).json({ error: { message: `Upstream error ${response.status}: ${text}`, type: "upstream_error" } });
       return;

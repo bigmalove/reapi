@@ -15,6 +15,55 @@ type NodeSignal =
   | { action: "cooldown"; upstreamStatus: number }
   | null;
 
+export const FREE_TIER_BUDGET_EXCEEDED = "FREE_TIER_BUDGET_EXCEEDED";
+
+const BUDGET_EXCEEDED_PATTERNS: RegExp[] = [
+  /FREE_TIER_BUDGET_EXCEEDED/i,
+  /spend limit exceeded/i,
+  /spending limit exceeded/i,
+  /budget (?:limit )?exceeded/i,
+  /upgrade to a paid plan/i,
+];
+
+/** Pull `error.message` (or a top-level `message`) out of a JSON error body. */
+function extractErrorMessage(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+    };
+    if (typeof parsed.error === "string" && parsed.error) return parsed.error.slice(0, 300);
+    if (parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string" && parsed.error.message) {
+      return parsed.error.message.slice(0, 300);
+    }
+    if (typeof parsed.message === "string" && parsed.message) return parsed.message.slice(0, 300);
+  } catch {
+    // not JSON
+  }
+  return undefined;
+}
+
+/**
+ * Detect a free-tier budget/spend-limit error from the response body alone.
+ * Returns the normalized reason code and a human-readable message, or null.
+ */
+export function detectBudgetExceeded(body: string): { code: string; message: string } | null {
+  if (!body) return null;
+  let code: string | undefined;
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown } };
+    if (typeof parsed.error?.code === "string" && parsed.error.code) code = parsed.error.code;
+  } catch {
+    // not JSON — fall through to text matching
+  }
+  const matched = BUDGET_EXCEEDED_PATTERNS.some((re) => re.test(body));
+  if (!matched) return null;
+  return {
+    code: code && /budget|spend|limit|tier/i.test(code) ? code : FREE_TIER_BUDGET_EXCEEDED,
+    message: extractErrorMessage(body) ?? body.slice(0, 300),
+  };
+}
+
 function parseNodeSignal(status: number, body: string): NodeSignal {
   if (status !== 502 && status !== 401) return null;
 
@@ -99,6 +148,51 @@ export function maybeDisableSelectedNode(args: {
     return;
   }
 
+  // Free-tier budget exhausted. Replit's AI gateway has reported this in more
+  // than one shape (403 + code FREE_TIER_BUDGET_EXCEEDED, and a plain
+  // "Free tier monthly spend limit exceeded. Please upgrade to a paid plan..."
+  // message that may arrive as 402/429/403). The status is not reliable, so
+  // match on the body. This must run before the 429 cooldown branch: a budget
+  // error is not a transient rate limit and a 60s cooldown would just let the
+  // node rotate back in and fail again.
+  const budget = detectBudgetExceeded(responseBody);
+  if (budget) {
+    logger.warn(
+      {
+        nodeUrl: endpoint.nodeUrl,
+        upstreamStatus: responseStatus,
+        upstreamReason: budget.code,
+        message: budget.message,
+      },
+      "upstream node free-tier budget exceeded — removing node from pool",
+    );
+    disableUpstreamNode({
+      url: endpoint.nodeUrl,
+      disabledReason: "upstream-node-unavailable",
+      upstreamReason: budget.code,
+      upstreamStatus: responseStatus,
+      lastError: budget.message,
+    });
+    return;
+  }
+
+  // 402 Payment Required is never transient — the account needs billing action.
+  if (responseStatus === 402) {
+    const lastError = extractErrorMessage(responseBody) ?? responseBody.slice(0, 300);
+    logger.warn(
+      { nodeUrl: endpoint.nodeUrl, upstreamStatus: 402, message: lastError },
+      "upstream node returned 402 Payment Required — removing node from pool",
+    );
+    disableUpstreamNode({
+      url: endpoint.nodeUrl,
+      disabledReason: "upstream-node-unavailable",
+      upstreamReason: "payment_required",
+      upstreamStatus: 402,
+      lastError,
+    });
+    return;
+  }
+
   // A raw 429 from the upstream node means it is rate-limited — temporary.
   // Apply a cooldown so round-robin skips it for a while, but do not remove it.
   if (responseStatus === 429) {
@@ -123,12 +217,10 @@ export function maybeDisableSelectedNode(args: {
       if (typeof parsed.error?.code === "string" && parsed.error.code) {
         upstreamReason = parsed.error.code;
       }
-      if (typeof parsed.error?.message === "string" && parsed.error.message) {
-        lastError = parsed.error.message.slice(0, 300);
-      }
     } catch {
       // body is not JSON — keep defaults
     }
+    lastError = extractErrorMessage(responseBody) ?? lastError;
     logger.warn(
       {
         nodeUrl: endpoint.nodeUrl,
