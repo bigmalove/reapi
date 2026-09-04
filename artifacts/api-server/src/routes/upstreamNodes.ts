@@ -61,13 +61,19 @@ router.post("/api/upstream-nodes/register", (req, res) => {
     // and running (e.g. a 403 FREE_TIER_BUDGET_EXCEEDED), so they keep sending
     // heartbeats while broken and a registration proves nothing.
     //
-    // Exception: a node disabled for REPLIT_HOSTING_SHUTDOWN had no process
-    // running at all, so it could not have sent this request. Receiving one
-    // means the deployment is live again — fall through and restore it.
+    // Exceptions that fall through and restore the node:
+    //  - REPLIT_HOSTING_SHUTDOWN: the node had no process running at all, so it
+    //    could not have sent this request. Receiving one means the deployment
+    //    is live again.
+    //  - `recoverAt` has passed: a time-boxed disable (free-tier monthly spend
+    //    limit) whose window is over.
     const existingDisabled = settings.disabledUpstreamNodes.find((e) => e.url === rawUrl);
     const wasShutDown = existingDisabled?.upstreamReason === REPLIT_HOSTING_SHUTDOWN;
+    const recovered =
+      existingDisabled?.recoverAt !== undefined &&
+      Date.parse(existingDisabled.recoverAt) <= Date.now();
 
-    if (existingDisabled?.disabledReason === "upstream-node-unavailable" && !wasShutDown) {
+    if (existingDisabled?.disabledReason === "upstream-node-unavailable" && !wasShutDown && !recovered) {
       res.json({
         registered: true,
         type: "replit-app",
@@ -81,6 +87,11 @@ router.post("/api/upstream-nodes/register", (req, res) => {
       logger.info(
         { nodeUrl: rawUrl, disabledAt: existingDisabled?.disabledAt },
         "redeployed node re-registered after hosting shutdown — restoring to pool",
+      );
+    } else if (recovered) {
+      logger.info(
+        { nodeUrl: rawUrl, disabledAt: existingDisabled?.disabledAt, recoverAt: existingDisabled?.recoverAt },
+        "node re-registered after its recovery time — restoring to pool",
       );
     }
 
@@ -195,6 +206,7 @@ router.post("/api/upstream-nodes/copy-from", async (req, res) => {
         if (typeof e["lastError"] === "string") node.lastError = e["lastError"];
         if (typeof e["upstreamReason"] === "string") node.upstreamReason = e["upstreamReason"];
         if (typeof e["upstreamStatus"] === "number") node.upstreamStatus = e["upstreamStatus"];
+        if (typeof e["recoverAt"] === "string") node.recoverAt = e["recoverAt"];
         remoteDisabled.push(node);
       }
     }

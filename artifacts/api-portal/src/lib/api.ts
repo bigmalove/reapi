@@ -39,6 +39,8 @@ export interface DisabledUpstreamNode {
   lastError?: string;
   upstreamReason?: string;
   upstreamStatus?: number;
+  /** ISO time after which the node is automatically restored to the pool. */
+  recoverAt?: string;
 }
 
 export interface Settings {

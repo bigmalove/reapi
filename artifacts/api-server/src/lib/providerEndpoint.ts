@@ -1,4 +1,4 @@
-import { getSettings, updateSettings, type ProviderName, type PoolEntry } from "./settings.js";
+import { getSettings, updateSettings, restoreExpiredDisabledNodes, type ProviderName, type PoolEntry } from "./settings.js";
 import { logger } from "./logger.js";
 
 export type { ProviderName };
@@ -151,6 +151,10 @@ export function peekNextPoolIndex(): number | null {
  * Throws when no source is available.
  */
 export function resolveProviderEndpoint(provider: ProviderName): ProviderEndpoint {
+  // Bring back any disabled node whose recovery window (e.g. the 31-day
+  // free-tier reset) has elapsed. Cheap when nothing is due; only writes when
+  // a node is actually restored.
+  restoreExpiredDisabledNodes();
   const settings = getSettings();
   if (settings.reverseProxyEnabled) {
     const override = settings.providerOverrides[provider];

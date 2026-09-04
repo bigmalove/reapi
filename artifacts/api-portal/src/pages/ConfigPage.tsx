@@ -344,6 +344,7 @@ export default function ConfigPage() {
         lastError: n.lastError,
         upstreamReason: n.upstreamReason,
         upstreamStatus: n.upstreamStatus,
+        recoverAt: n.recoverAt,
       })),
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -831,7 +832,7 @@ export default function ConfigPage() {
             <div>
               <h3 className="text-sm font-semibold text-amber-400">被屏蔽的上游节点</h3>
               <p className="mt-1 text-xs text-muted-foreground">
-                以下节点因出错被自动屏蔽。可点击"重新启用"将其恢复至代理池。
+                以下节点因出错被自动屏蔽。可点击"重新启用"将其恢复至代理池。免费额度耗尽的节点会在 31 天后自动恢复，也可手动提前启用。
               </p>
             </div>
             {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.type !== "replit-dev") && (
@@ -869,6 +870,13 @@ export default function ConfigPage() {
                     node.disabledReason === "upstream-node-unavailable"
                       ? "上游节点不可用"
                       : node.disabledReason;
+                  const isBudget = !!node.upstreamReason && /FREE_TIER|budget|spend/i.test(node.upstreamReason);
+                  const recoverMs = node.recoverAt ? Date.parse(node.recoverAt) : NaN;
+                  const recoverLabel = Number.isNaN(recoverMs)
+                    ? null
+                    : recoverMs <= Date.now()
+                      ? "等待恢复"
+                      : `预计 ${new Date(recoverMs).toLocaleString("zh-CN")} 自动恢复`;
                   return (
                     <div
                       key={node.url}
@@ -881,9 +889,19 @@ export default function ConfigPage() {
                             <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/15 text-amber-400">
                               {reasonLabel}
                             </span>
+                            {isBudget && (
+                              <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/10 text-amber-300/80">
+                                免费额度耗尽
+                              </span>
+                            )}
                             {node.disabledAt && (
                               <span className="text-[10px] text-muted-foreground">
                                 {new Date(node.disabledAt).toLocaleString("zh-CN")}
+                              </span>
+                            )}
+                            {recoverLabel && (
+                              <span className="text-[10px] rounded px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400">
+                                {recoverLabel}
                               </span>
                             )}
                           </div>

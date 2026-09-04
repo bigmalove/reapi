@@ -32,6 +32,7 @@ interface PublicDisabledNode {
   lastError?: string;
   upstreamReason?: string;
   upstreamStatus?: number;
+  recoverAt?: string;
 }
 
 interface PublicSettings {
@@ -65,6 +66,7 @@ function toPublic(s: ServerSettings): PublicSettings {
       lastError: n.lastError,
       upstreamReason: n.upstreamReason,
       upstreamStatus: n.upstreamStatus,
+      recoverAt: n.recoverAt,
     })),
   };
 }

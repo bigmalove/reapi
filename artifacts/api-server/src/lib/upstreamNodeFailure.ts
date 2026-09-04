@@ -1,4 +1,4 @@
-import { disableUpstreamNode, REPLIT_HOSTING_SHUTDOWN } from "./settings.js";
+import { disableUpstreamNode, REPLIT_HOSTING_SHUTDOWN, FREE_TIER_RECOVERY_MS } from "./settings.js";
 import { logger } from "./logger.js";
 import { setNodeCooldown, rotateNodeToEnd } from "./providerEndpoint.js";
 import type { ProviderEndpoint } from "./providerEndpoint.js";
@@ -154,17 +154,20 @@ export function maybeDisableSelectedNode(args: {
   // message that may arrive as 402/429/403). The status is not reliable, so
   // match on the body. This must run before the 429 cooldown branch: a budget
   // error is not a transient rate limit and a 60s cooldown would just let the
-  // node rotate back in and fail again.
+  // node rotate back in and fail again. The limit is monthly, though, so the
+  // node is scheduled to return to the pool after FREE_TIER_RECOVERY_MS.
   const budget = detectBudgetExceeded(responseBody);
   if (budget) {
+    const recoverAt = new Date(Date.now() + FREE_TIER_RECOVERY_MS).toISOString();
     logger.warn(
       {
         nodeUrl: endpoint.nodeUrl,
         upstreamStatus: responseStatus,
         upstreamReason: budget.code,
         message: budget.message,
+        recoverAt,
       },
-      "upstream node free-tier budget exceeded — removing node from pool",
+      "upstream node free-tier budget exceeded — removing node from pool for 31 days",
     );
     disableUpstreamNode({
       url: endpoint.nodeUrl,
@@ -172,6 +175,7 @@ export function maybeDisableSelectedNode(args: {
       upstreamReason: budget.code,
       upstreamStatus: responseStatus,
       lastError: budget.message,
+      recoverAfterMs: FREE_TIER_RECOVERY_MS,
     });
     return;
   }

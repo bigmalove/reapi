@@ -1,4 +1,5 @@
 import { readJsonAsync, writeJson } from "./persist.js";
+import { logger } from "./logger.js";
 
 export type ProviderName = "openai" | "anthropic" | "gemini" | "openrouter";
 
@@ -29,6 +30,16 @@ export type DisabledReason = "requires-wakeup" | "upstream-node-unavailable";
  */
 export const REPLIT_HOSTING_SHUTDOWN = "replit-hosting-shutdown";
 
+/**
+ * How long a node stays disabled after its free-tier monthly spend limit is
+ * exceeded. The quota is monthly, so the node is automatically restored to the
+ * pool once this window has passed (see `restoreExpiredDisabledNodes`).
+ */
+export const FREE_TIER_RECOVERY_MS = 31 * 24 * 60 * 60 * 1000;
+
+/** `upstreamReason` values that denote an exhausted free-tier budget. */
+const BUDGET_REASON_RE = /FREE_TIER|budget|spend/i;
+
 export interface DisabledUpstreamNode {
   url: string;
   type: UpstreamNodeType;
@@ -38,6 +49,12 @@ export interface DisabledUpstreamNode {
   upstreamStatus?: number;
   disabledAt?: string;
   lastError?: string;
+  /**
+   * ISO timestamp after which the node is automatically restored to the pool.
+   * Absent means the disable is permanent until re-enabled manually (or, for
+   * REPLIT_HOSTING_SHUTDOWN, until the node re-registers).
+   */
+  recoverAt?: string;
 }
 
 export interface ServerSettings {
@@ -135,6 +152,21 @@ function normalizeDisabledNodes(raw: unknown): DisabledUpstreamNode[] {
     if (typeof v["upstreamStatus"] === "number") entry.upstreamStatus = v["upstreamStatus"];
     if (typeof v["disabledAt"] === "string") entry.disabledAt = v["disabledAt"];
     if (typeof v["lastError"] === "string") entry.lastError = v["lastError"];
+    if (typeof v["recoverAt"] === "string") entry.recoverAt = v["recoverAt"];
+    // Migration: budget-exceeded nodes persisted before `recoverAt` existed were
+    // disabled permanently. Backfill the recovery time from `disabledAt` so they
+    // still come back once the monthly quota resets.
+    if (
+      entry.recoverAt === undefined &&
+      entry.disabledAt !== undefined &&
+      entry.upstreamReason !== undefined &&
+      BUDGET_REASON_RE.test(entry.upstreamReason)
+    ) {
+      const disabledMs = Date.parse(entry.disabledAt);
+      if (!Number.isNaN(disabledMs)) {
+        entry.recoverAt = new Date(disabledMs + FREE_TIER_RECOVERY_MS).toISOString();
+      }
+    }
     out.push(entry);
   }
   return out;
@@ -192,6 +224,8 @@ export function disableUpstreamNode(args: {
   upstreamReason?: string;
   upstreamStatus?: number;
   lastError?: string;
+  /** When set, the node is automatically restored after this many ms. */
+  recoverAfterMs?: number;
 }): void {
   const settings = getSettings();
   const url = args.url.trim().replace(/\/+$/, "");
@@ -220,6 +254,9 @@ export function disableUpstreamNode(args: {
   if (args.upstreamReason !== undefined) entry.upstreamReason = args.upstreamReason;
   if (args.upstreamStatus !== undefined) entry.upstreamStatus = args.upstreamStatus;
   if (args.lastError !== undefined) entry.lastError = args.lastError;
+  if (args.recoverAfterMs !== undefined) {
+    entry.recoverAt = new Date(Date.now() + args.recoverAfterMs).toISOString();
+  }
 
   // Replace or append in disabled list
   const newDisabled = settings.disabledUpstreamNodes.filter((e) => e.url !== url);
@@ -236,6 +273,43 @@ export function disableUpstreamNode(args: {
   }
 
   updateSettings(patch);
+}
+
+/**
+ * Restore every disabled node whose `recoverAt` has passed. Restored nodes are
+ * appended to the pool with a blank apiKey (inheriting pool[0]'s key, as the
+ * register / re-enable routes do) and the proxy is switched back on. Only
+ * writes settings when something actually changed. Returns the restored URLs.
+ */
+export function restoreExpiredDisabledNodes(now: number = Date.now()): string[] {
+  const settings = getSettings();
+  const restored: string[] = [];
+  const keep: DisabledUpstreamNode[] = [];
+
+  for (const entry of settings.disabledUpstreamNodes) {
+    const recoverMs = entry.recoverAt !== undefined ? Date.parse(entry.recoverAt) : NaN;
+    if (entry.type === "replit-app" && !Number.isNaN(recoverMs) && recoverMs <= now) {
+      restored.push(entry.url);
+    } else {
+      keep.push(entry);
+    }
+  }
+
+  if (restored.length === 0) return restored;
+
+  const pool = [...settings.reverseProxyPool];
+  for (const url of restored) {
+    if (!pool.some((e) => e.url === url)) pool.push({ url, apiKey: "" });
+    logger.info({ nodeUrl: url }, "disabled upstream node reached its recovery time — restoring to pool");
+  }
+
+  updateSettings({
+    reverseProxyPool: pool,
+    disabledUpstreamNodes: keep,
+    reverseProxyEnabled: true,
+  });
+
+  return restored;
 }
 
 export function updateSettings(patch: Partial<ServerSettings>): ServerSettings {
