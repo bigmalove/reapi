@@ -285,7 +285,8 @@ export async function callAnthropic(
   const { system, msgs } = convertMessagesToAnthropic(request.messages);
 
   // Models using adaptive thinking API (effort-based); all others use legacy budget_tokens.
-  // Match by prefix to handle date-versioned IDs like claude-opus-4-7-20250514.
+  // Match by prefix to handle date-versioned IDs like claude-opus-4-7-20250514
+  // and point releases like claude-fable-5.1.
   const ADAPTIVE_THINKING_PREFIXES = [
     "claude-opus-5",
     "claude-opus-4-6",
@@ -295,7 +296,10 @@ export async function callAnthropic(
     "claude-sonnet-5",
   ];
   const usesAdaptiveThinking = ADAPTIVE_THINKING_PREFIXES.some(
-    (prefix) => actualModel === prefix || actualModel.startsWith(`${prefix}-`),
+    (prefix) =>
+      actualModel === prefix ||
+      actualModel.startsWith(`${prefix}.`) ||
+      actualModel.startsWith(`${prefix}-`),
   );
 
   // Anthropic requires budget_tokens >= 1024; ensure max_tokens is high enough.

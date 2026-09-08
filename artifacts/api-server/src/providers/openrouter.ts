@@ -78,17 +78,26 @@ export async function callOpenRouter(
   // OpenAI reasoning models on OpenRouter (gpt-5.x, gpt-5.x-pro, o-series)
   const isOpenAIReasoningModel = /^openai\/(gpt-5(\.\d+)?(-pro|-mini|-nano)?|o\d[\w-]*)$/.test(actualModel);
 
-  // Models using adaptive thinking API (effort-based) via OpenRouter/Bedrock
-  // actualModel is the resolved OpenRouter model ID (after Bedrock alias lookup)
-  const ADAPTIVE_THINKING_MODELS = new Set([
+  // Models using adaptive thinking API (effort-based) via OpenRouter/Bedrock.
+  // actualModel is the resolved OpenRouter model ID (after Bedrock alias lookup).
+  // Matched by model-family prefix rather than exact id so point releases and
+  // dated ids added at runtime from the OpenRouter catalog (e.g.
+  // anthropic/claude-fable-5.1) get `output_config.effort` instead of the
+  // legacy `budget_tokens` these models reject.
+  const ADAPTIVE_THINKING_PREFIXES = [
     "anthropic/claude-opus-5",
     "anthropic/claude-opus-4.7",
     "anthropic/claude-opus-4.8",
     "anthropic/claude-fable-5",
     "anthropic/claude-fable-latest",
     "anthropic/claude-sonnet-5",
-  ]);
-  const usesAdaptiveThinking = ADAPTIVE_THINKING_MODELS.has(actualModel);
+  ];
+  const usesAdaptiveThinking = ADAPTIVE_THINKING_PREFIXES.some(
+    (prefix) =>
+      actualModel === prefix ||
+      actualModel.startsWith(`${prefix}.`) ||
+      actualModel.startsWith(`${prefix}-`),
+  );
 
   // Build the request body
   const body: Record<string, unknown> = {

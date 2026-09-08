@@ -78,6 +78,8 @@ OpenAI reasoning models (`gpt-5.5`, `o*`, and OpenRouter `openai/gpt-5.5*`) acce
 
 Provider also strips unsupported params (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`) and converts `max_tokens` → `max_completion_tokens` for reasoning models.
 
+Claude adaptive-thinking families (`claude-opus-5`, `claude-opus-4-7`/`4.8`, `claude-fable-5`, `claude-sonnet-5`, and via OpenRouter also `anthropic/claude-fable-latest`) are matched by **family prefix**, so point releases and dated ids (`claude-fable-5.1`, `anthropic/claude-fable-5.1`, `claude-opus-4-7-20250514`) are covered automatically — including `anthropic/*` ids added at runtime from the OpenRouter catalog. The same `-thinking-{level}` suffix works on them (e.g. `anthropic/claude-fable-5.1-thinking-low`) and is sent as `thinking: {type: "adaptive"}` + `output_config.effort`; `temperature`/`top_p`/`top_k` are stripped because these models reject them. Note the gateway only reads the thinking level from the model-name suffix, not from a body-level `reasoning_effort`.
+
 ### OpenRouter provider pinning
 
 The Replit AI Integration proxy passes through the `provider` field for some sources but strips it for others:
