@@ -112,6 +112,29 @@ export interface OpenRouterCatalogResponse {
 
 export type AddModelSkipReason = "invalid-id" | "builtin" | "already-added" | "limit-reached";
 
+/**
+ * Thinking-variant suffixes the gateway registers next to a base model when
+ * asked to (mirrors THINKING_VARIANT_SUFFIXES in the api-server).
+ */
+export const THINKING_VARIANT_SUFFIXES = [
+  "-thinking",
+  "-thinking-low",
+  "-thinking-medium",
+  "-thinking-high",
+  "-thinking-xhigh",
+  "-thinking-max",
+] as const;
+
+/** True when `id` is itself a thinking variant rather than a base model. */
+export function isThinkingVariantId(id: string): boolean {
+  return /-thinking(-visible|-low|-medium|-high|-xhigh|-max)?$/.test(id);
+}
+
+/** Thinking-variant ids derived from a base model id. */
+export function thinkingVariantIds(baseId: string): string[] {
+  return THINKING_VARIANT_SUFFIXES.map((suffix) => `${baseId}${suffix}`);
+}
+
 export interface AddModelsResult {
   ok: boolean;
   added: Array<{ id: string; provider: string; created: number }>;
@@ -257,24 +280,30 @@ export async function fetchOpenRouterCatalog(refresh = false): Promise<OpenRoute
   return res.json();
 }
 
+/**
+ * Add models to the registry. With `thinkingVariants` the server also registers
+ * the `-thinking*` variants of every base id (see THINKING_VARIANT_SUFFIXES).
+ */
 export async function addModels(
   models: Array<{ id: string; created?: number }>,
   provider = "openrouter",
+  thinkingVariants = false,
 ): Promise<AddModelsResult> {
   const res = await fetch(`${V1_BASE}/admin/models`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ provider, models }),
+    body: JSON.stringify({ provider, models, thinking_variants: thinkingVariants }),
   });
   if (!res.ok) throw new Error(await errorMessage(res));
   return res.json();
 }
 
-export async function deleteModel(id: string): Promise<void> {
+/** Remove an operator-added model, optionally together with its `-thinking*` variants. */
+export async function deleteModel(id: string, thinkingVariants = false): Promise<void> {
   const res = await fetch(`${V1_BASE}/admin/models`, {
     method: "DELETE",
     headers: authHeaders(),
-    body: JSON.stringify({ id }),
+    body: JSON.stringify({ id, thinking_variants: thinkingVariants }),
   });
   if (!res.ok) throw new Error(await errorMessage(res));
 }

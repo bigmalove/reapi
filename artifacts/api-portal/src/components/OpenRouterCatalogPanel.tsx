@@ -2,6 +2,8 @@ import { useCallback, useMemo, useState } from "react";
 import {
   addModels,
   fetchOpenRouterCatalog,
+  isThinkingVariantId,
+  THINKING_VARIANT_SUFFIXES,
   type AddModelSkipReason,
   type OpenRouterCatalogEntry,
   type OpenRouterCatalogResponse,
@@ -57,6 +59,10 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
   const [hideExisting, setHideExisting] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState(false);
+  // Also register -thinking / -thinking-{level} variants for every added model,
+  // so clients that pick from /v1/models (e.g. SillyTavern) can choose a level
+  // without typing the suffix by hand.
+  const [withThinking, setWithThinking] = useState(false);
   const [notice, setNotice] = useState("");
 
   const load = useCallback(async (refresh: boolean) => {
@@ -124,7 +130,11 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
       const skipped: Array<{ id: string; reason: AddModelSkipReason }> = [];
       for (let i = 0; i < picked.length; i += ADD_CHUNK_SIZE) {
         const batch = picked.slice(i, i + ADD_CHUNK_SIZE);
-        const result = await addModels(batch.map((m) => ({ id: m.id, created: m.created })));
+        const result = await addModels(
+          batch.map((m) => ({ id: m.id, created: m.created })),
+          "openrouter",
+          withThinking,
+        );
         added.push(...result.added);
         skipped.push(...result.skipped);
       }
@@ -136,7 +146,12 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
           : { ...prev, data: prev.data.map((m) => (addedIds.has(m.id) ? { ...m, existing: true } : m)) },
       );
       setSelected(new Set());
-      const parts = [`已添加 ${added.length} 个模型`];
+      const variantCount = added.filter((m) => isThinkingVariantId(m.id)).length;
+      const parts = [
+        variantCount > 0
+          ? `已添加 ${added.length - variantCount} 个模型及 ${variantCount} 个思考变种`
+          : `已添加 ${added.length} 个模型`,
+      ];
       if (skipped.length > 0) parts.push(`跳过 ${summarizeSkipped(skipped)}`);
       setNotice(parts.join("，"));
       onAdded();
@@ -275,6 +290,18 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
           {catalog !== null && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted-foreground">已选 {selected.size} 个</span>
+              <label
+                className="flex items-center gap-1.5 text-xs text-muted-foreground select-none"
+                title={`为每个模型额外添加 ${THINKING_VARIANT_SUFFIXES.length} 个变种：${THINKING_VARIANT_SUFFIXES.join("、")}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={withThinking}
+                  onChange={(e) => setWithThinking(e.target.checked)}
+                  className="size-3.5 accent-primary"
+                />
+                同时添加思考变种
+              </label>
               <button
                 onClick={selectAllVisible}
                 disabled={selectableVisible.length === 0}
@@ -294,7 +321,11 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
                 disabled={adding || selected.size === 0}
                 className="ml-auto text-xs px-3 py-1.5 rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-40"
               >
-                {adding ? "添加中..." : `添加选中的 ${selected.size} 个`}
+                {adding
+                  ? "添加中..."
+                  : withThinking
+                    ? `添加选中的 ${selected.size} 个（含变种共 ${selected.size * (THINKING_VARIANT_SUFFIXES.length + 1)} 个）`
+                    : `添加选中的 ${selected.size} 个`}
               </button>
             </div>
           )}

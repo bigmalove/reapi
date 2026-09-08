@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import {
+  addModels,
   deleteModel,
   fetchAdminModels,
+  isThinkingVariantId,
   patchModel,
   patchProviderModels,
+  thinkingVariantIds,
   type ModelEntry,
 } from "../lib/api";
 import OpenRouterCatalogPanel from "../components/OpenRouterCatalogPanel";
@@ -102,14 +105,43 @@ export default function ModelsPage() {
     }
   }
 
+  /** Register the -thinking* variants for a custom base model that was added without them. */
+  async function addVariants(model: ModelEntry) {
+    setUpdating((s) => new Set(s).add(model.id));
+    try {
+      await addModels([{ id: model.id, created: model.created }], model.provider, true);
+      await load(true);
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setUpdating((s) => {
+        const next = new Set(s);
+        next.delete(model.id);
+        return next;
+      });
+    }
+  }
+
   async function removeModel(id: string) {
-    if (!confirm(`确定从模型列表中删除「${id}」？`)) return;
+    // Operator-added -thinking* variants registered for this base id go with it.
+    const customIds = new Set(
+      groups.flatMap((g) => g.models.filter((m) => m.custom).map((m) => m.id)),
+    );
+    const variants = isThinkingVariantId(id)
+      ? []
+      : thinkingVariantIds(id).filter((variantId) => customIds.has(variantId));
+    const prompt =
+      variants.length > 0
+        ? `确定从模型列表中删除「${id}」及其 ${variants.length} 个思考变种？`
+        : `确定从模型列表中删除「${id}」？`;
+    if (!confirm(prompt)) return;
     setUpdating((s) => new Set(s).add(id));
     try {
-      await deleteModel(id);
+      await deleteModel(id, variants.length > 0);
+      const gone = new Set([id, ...variants]);
       setGroups((prev) =>
         prev
-          .map((g) => ({ ...g, models: g.models.filter((m) => m.id !== id) }))
+          .map((g) => ({ ...g, models: g.models.filter((m) => !gone.has(m.id)) }))
           .filter((g) => g.models.length > 0)
       );
     } catch (e) {
@@ -193,6 +225,7 @@ export default function ModelsPage() {
       <OpenRouterCatalogPanel onAdded={() => void load(true)} />
 
       {groups.map((group) => {
+        const customIds = new Set(group.models.filter((m) => m.custom).map((m) => m.id));
         const allEnabled = group.models.every((m) => !m.disabled);
         const allDisabled = group.models.every((m) => m.disabled);
         const providerKey = `_provider_${group.provider}`;
@@ -249,6 +282,18 @@ export default function ModelsPage() {
                     )}
                   </span>
                   <span className="flex shrink-0 items-center gap-3">
+                    {model.custom &&
+                      !isThinkingVariantId(model.id) &&
+                      !thinkingVariantIds(model.id).some((variantId) => customIds.has(variantId)) && (
+                        <button
+                          disabled={updating.has(model.id)}
+                          onClick={() => void addVariants(model)}
+                          title="添加 -thinking、-thinking-low/medium/high/xhigh/max 变种"
+                          className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
+                        >
+                          添加思考变种
+                        </button>
+                      )}
                     {model.custom && (
                       <button
                         disabled={updating.has(model.id)}

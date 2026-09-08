@@ -107,7 +107,13 @@ catalog and lets the operator pick which models to add:
   Built-in models can only be disabled, never deleted (DELETE returns 404 for them).
 - Adding an id clears it from `disabled_models.json`, so a freshly added model shows up on
   `/v1/models` immediately.
-- Cap: `MAX_CUSTOM_MODELS` (2000) total, 500 ids per POST.
+- Cap: `MAX_CUSTOM_MODELS` (2000) total, 500 base ids per POST.
+- `thinking_variants: true` on POST (request-level, or per `models[]` item) also registers
+  `<id>-thinking` and `<id>-thinking-{low,medium,high,xhigh,max}` right after each base id,
+  mirroring the built-in Claude entries, so clients that pick models from `/v1/models` can
+  choose a thinking level without typing the suffix. The portal exposes this as the
+  「同时添加思考变种」checkbox. DELETE accepts the same flag to remove a base id together
+  with its operator-added variants (the portal does this automatically when variants exist).
 
 ## Reverse-Proxy Forwarding Mode
 

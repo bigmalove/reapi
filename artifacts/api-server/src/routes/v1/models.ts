@@ -5,14 +5,20 @@ import {
   getAllModelsWithStatus,
   getEnabledModels,
   getModelRegistry,
+  isThinkingVariantId,
   patchModelDisabled,
   removeCustomModel,
+  thinkingVariantIds,
 } from "../../lib/models.js";
 import { getOpenRouterCatalog } from "../../lib/openrouterCatalog.js";
 
 const router = Router();
 
-/** Max ids accepted in a single POST /v1/admin/models call. */
+/**
+ * Max base ids accepted in a single POST /v1/admin/models call. Thinking
+ * variants expanded from those ids ride along and are not counted here; the
+ * total registry size is still bounded by MAX_CUSTOM_MODELS.
+ */
 const MAX_ADD_BATCH = 500;
 
 router.get("/v1/models", requireAuth, (_req, res) => {
@@ -66,38 +72,64 @@ router.get("/v1/admin/openrouter/models", requireAuth, async (req, res) => {
   }
 });
 
-/** Add models to the registry (used by the portal's "add OpenRouter model" panel). */
+/**
+ * Add models to the registry (used by the portal's "add OpenRouter model" panel).
+ *
+ * `thinking_variants: true` (request-level, or per `models[]` item) also
+ * registers `<id>-thinking` and `<id>-thinking-{low,medium,high,xhigh,max}`
+ * right after each base id, mirroring the built-in Claude entries.
+ */
 router.post("/v1/admin/models", requireAuth, (req, res) => {
   const body = (req.body ?? {}) as {
     ids?: unknown;
     models?: unknown;
     provider?: unknown;
+    thinking_variants?: unknown;
   };
   const fallbackProvider = typeof body.provider === "string" ? body.provider : "openrouter";
+  const defaultVariants = body.thinking_variants === true;
 
-  const inputs: Array<{ id?: unknown; provider?: unknown; created?: unknown }> = [];
+  type AddInput = { id?: unknown; provider?: unknown; created?: unknown };
+  const inputs: AddInput[] = [];
+  let baseCount = 0;
+
+  function pushInput(input: AddInput, withVariants: boolean) {
+    inputs.push(input);
+    baseCount++;
+    if (!withVariants || typeof input.id !== "string") return;
+    const baseId = input.id.trim();
+    if (!baseId || isThinkingVariantId(baseId)) return;
+    for (const variantId of thinkingVariantIds(baseId)) {
+      inputs.push({ ...input, id: variantId });
+    }
+  }
 
   if (Array.isArray(body.ids)) {
     for (const id of body.ids) {
-      inputs.push({ id, provider: fallbackProvider });
+      pushInput({ id, provider: fallbackProvider }, defaultVariants);
     }
   }
   if (Array.isArray(body.models)) {
     for (const raw of body.models) {
       const entry = (raw ?? {}) as Record<string, unknown>;
-      inputs.push({
-        id: entry["id"],
-        provider: entry["provider"] ?? fallbackProvider,
-        created: entry["created"],
-      });
+      const withVariants =
+        typeof entry["thinking_variants"] === "boolean" ? entry["thinking_variants"] : defaultVariants;
+      pushInput(
+        {
+          id: entry["id"],
+          provider: entry["provider"] ?? fallbackProvider,
+          created: entry["created"],
+        },
+        withVariants,
+      );
     }
   }
 
-  if (inputs.length === 0) {
+  if (baseCount === 0) {
     res.status(400).json({ error: { message: "ids[] or models[] is required" } });
     return;
   }
-  if (inputs.length > MAX_ADD_BATCH) {
+  if (baseCount > MAX_ADD_BATCH) {
     res.status(400).json({
       error: { message: `Too many models in one request (max ${MAX_ADD_BATCH})` },
     });
@@ -130,15 +162,23 @@ router.patch("/v1/admin/models", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-/** Delete an operator-added model. Built-in models can only be disabled. */
+/**
+ * Delete an operator-added model. Built-in models can only be disabled.
+ * `thinking_variants: true` (body, or `?thinking_variants=1`) also removes the
+ * operator-added `-thinking*` variants registered for that base id.
+ */
 router.delete("/v1/admin/models", requireAuth, (req, res) => {
-  const fromBody = (req.body ?? {}) as { id?: unknown };
+  const fromBody = (req.body ?? {}) as { id?: unknown; thinking_variants?: unknown };
   const id =
     typeof fromBody.id === "string"
       ? fromBody.id.trim()
       : typeof req.query["id"] === "string"
         ? req.query["id"].trim()
         : "";
+  const withVariants =
+    fromBody.thinking_variants === true ||
+    req.query["thinking_variants"] === "1" ||
+    req.query["thinking_variants"] === "true";
 
   if (!id) {
     res.status(400).json({ error: { message: "id is required" } });
@@ -150,7 +190,13 @@ router.delete("/v1/admin/models", requireAuth, (req, res) => {
     });
     return;
   }
-  res.json({ ok: true });
+  const removed = [id];
+  if (withVariants && !isThinkingVariantId(id)) {
+    for (const variantId of thinkingVariantIds(id)) {
+      if (removeCustomModel(variantId)) removed.push(variantId);
+    }
+  }
+  res.json({ ok: true, removed });
 });
 
 export default router;

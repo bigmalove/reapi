@@ -208,8 +208,8 @@ for chunk in stream:
                 ["GET", "/v1/admin/models", "列出全部模型及其状态"],
                 ["PATCH", "/v1/admin/models", "启用/禁用模型"],
                 ["GET", "/v1/admin/openrouter/models", "远程拉取 OpenRouter 最新模型目录"],
-                ["POST", "/v1/admin/models", "把模型加入模型列表"],
-                ["DELETE", "/v1/admin/models", "移除手动添加的模型"],
+                ["POST", "/v1/admin/models", "把模型加入模型列表（thinking_variants: true 同时添加思考变种）"],
+                ["DELETE", "/v1/admin/models", "移除手动添加的模型（thinking_variants: true 连带删除其思考变种）"],
               ].map(([method, path, desc]) => (
                 <tr key={path + method}>
                   <td className="py-2 pr-4">

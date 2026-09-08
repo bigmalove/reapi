@@ -328,6 +328,33 @@ const CUSTOM_MODELS_KEY = "custom_models.json";
 /** Upper bound on one add request, so a bad client can't blow up the kv row. */
 export const MAX_CUSTOM_MODELS = 2000;
 
+/**
+ * Suffixes the providers resolve as thinking variants of a base model id (see
+ * providers/anthropic.ts and providers/openrouter.ts). Used to register an
+ * operator-added model with the same variant set the built-in Claude entries
+ * ship with, so clients that pick models from `/v1/models` can choose a level.
+ */
+export const THINKING_VARIANT_SUFFIXES = [
+  "-thinking",
+  "-thinking-low",
+  "-thinking-medium",
+  "-thinking-high",
+  "-thinking-xhigh",
+  "-thinking-max",
+] as const;
+
+const THINKING_SUFFIX_RE = /-thinking(-visible|-low|-medium|-high|-xhigh|-max)?$/;
+
+/** True when `id` is already a thinking variant and must not be expanded again. */
+export function isThinkingVariantId(id: string): boolean {
+  return THINKING_SUFFIX_RE.test(id);
+}
+
+/** Thinking-variant ids derived from a base model id. */
+export function thinkingVariantIds(baseId: string): string[] {
+  return THINKING_VARIANT_SUFFIXES.map((suffix) => `${baseId}${suffix}`);
+}
+
 const BUILTIN_IDS = new Set(MODEL_REGISTRY.map((m) => m.id));
 
 export function getDefaultModel(): string {
