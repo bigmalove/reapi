@@ -203,11 +203,17 @@ export async function callOpenRouter(
     delete body["top_k"];
   }
 
+  // Claude thinking goes through OpenRouter's unified `reasoning` object. The
+  // Chat Completions endpoint ignores Anthropic-native `thinking` /
+  // `output_config` (those belong to OpenRouter's Messages API form), so
+  // sending them silently left the model at its default effort. OpenRouter
+  // re-emits `reasoning.effort` as `output_config.effort` for Claude (all of
+  // low/medium/high/xhigh/max are accepted) and `reasoning.max_tokens` as
+  // `budget_tokens` for legacy models.
   if (usesAdaptiveThinking && thinkingEnabled) {
     const budgetTokens = Math.floor(maxTokens * 0.8);
     const effort = explicitEffort ?? budgetToEffort(budgetTokens);
-    body["thinking"] = { type: "adaptive", display: "summarized" };
-    body["output_config"] = { effort };
+    body["reasoning"] = { effort };
   } else if (thinkingEnabled && isDeepSeek) {
     // DeepSeek uses OpenAI-compatible format:
     //   thinking: { type: "enabled" }  — enable thinking mode
@@ -228,15 +234,16 @@ export async function callOpenRouter(
     body["thinking"] = { type: "enabled" };
     body["reasoning_effort"] = effort;
   } else if (thinkingEnabled && !isOpenAIReasoningModel) {
-    // Anthropic-style budget_tokens thinking (skip for OpenAI — already handled above)
-    // Anthropic requires budget_tokens >= 1024; ensure max_tokens is high enough too.
+    // Legacy budget_tokens thinking (skip for OpenAI — already handled above).
+    // OpenRouter forwards `reasoning.max_tokens` to Anthropic as budget_tokens,
+    // which must be >= 1024 and below max_tokens; ensure max_tokens is high enough.
     const effectiveMax = Math.max(maxTokens, 2048);
     if (effectiveMax !== maxTokens) body["max_tokens"] = effectiveMax;
     const rawBudget = explicitEffort
       ? effortToTokens(explicitEffort, effectiveMax)
       : Math.floor(effectiveMax * 0.8);
     const budgetTokens = Math.max(rawBudget, 1024);
-    body["thinking"] = { type: "enabled", budget_tokens: budgetTokens };
+    body["reasoning"] = { max_tokens: budgetTokens };
     delete body["temperature"];
   }
 
