@@ -253,17 +253,12 @@ export async function callOpenRouter(
     // Anthropic-style `reasoning.max_tokens` budget we used to send here was
     // ignored and the model stayed at its default effort (e.g.
     // qwen/qwen3.8-max-0902 defaults to `xhigh` with reasoning mandatory).
-    // OpenRouter converts effort → budget itself for budget-only models.
-    // `max` is not in most models' accepted set, so it is sent as `xhigh`.
-    const GENERIC_EFFORT_MAP: Record<string, string> = {
-      low:    "low",
-      medium: "medium",
-      high:   "high",
-      xhigh:  "xhigh",
-      max:    "xhigh",
-    };
-    const effort = explicitEffort ? (GENERIC_EFFORT_MAP[explicitEffort] ?? "high") : "high";
-    body["reasoning"] = { effort };
+    // OpenRouter converts effort → budget itself for budget-only models, and
+    // maps an effort the model lacks to its nearest supported level (per its
+    // reasoning docs), so the level is passed through unchanged: `max` reaches
+    // models that accept it (moonshotai/kimi-k3: max/high/low) and is snapped
+    // to `xhigh` on those that don't (qwen/qwen3.8-max-0902).
+    body["reasoning"] = { effort: explicitEffort ?? "high" };
   }
 
   const outboundHeaders: Record<string, string> = {

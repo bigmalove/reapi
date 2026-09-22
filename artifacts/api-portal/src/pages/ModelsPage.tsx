@@ -105,7 +105,11 @@ export default function ModelsPage() {
     }
   }
 
-  /** Register the -thinking* variants for a custom base model that was added without them. */
+  /**
+   * Register the -thinking* variants for a base model that has none yet. The
+   * base may be built-in (e.g. moonshotai/kimi-k3): the server skips it as
+   * `builtin` and stores only the variants as custom entries.
+   */
   async function addVariants(model: ModelEntry) {
     setUpdating((s) => new Set(s).add(model.id));
     try {
@@ -117,6 +121,32 @@ export default function ModelsPage() {
       setUpdating((s) => {
         const next = new Set(s);
         next.delete(model.id);
+        return next;
+      });
+    }
+  }
+
+  /** Remove the operator-added -thinking* variants of a built-in base model, keeping the base. */
+  async function removeVariants(id: string) {
+    const customIds = new Set(
+      groups.flatMap((g) => g.models.filter((m) => m.custom).map((m) => m.id)),
+    );
+    const variants = thinkingVariantIds(id).filter((variantId) => customIds.has(variantId));
+    if (variants.length === 0) return;
+    if (!confirm(`确定删除「${id}」的 ${variants.length} 个思考变种？（内置模型本身保留）`)) return;
+    setUpdating((s) => new Set(s).add(id));
+    try {
+      await deleteModel(id, true);
+      const gone = new Set(variants);
+      setGroups((prev) =>
+        prev.map((g) => ({ ...g, models: g.models.filter((m) => !gone.has(m.id)) }))
+      );
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setUpdating((s) => {
+        const next = new Set(s);
+        next.delete(id);
         return next;
       });
     }
@@ -226,6 +256,7 @@ export default function ModelsPage() {
 
       {groups.map((group) => {
         const customIds = new Set(group.models.filter((m) => m.custom).map((m) => m.id));
+        const groupIds = new Set(group.models.map((m) => m.id));
         const allEnabled = group.models.every((m) => !m.disabled);
         const allDisabled = group.models.every((m) => m.disabled);
         const providerKey = `_provider_${group.provider}`;
@@ -282,16 +313,32 @@ export default function ModelsPage() {
                     )}
                   </span>
                   <span className="flex shrink-0 items-center gap-3">
-                    {model.custom &&
+                    {(model.custom || model.provider === "openrouter") &&
                       !isThinkingVariantId(model.id) &&
-                      !thinkingVariantIds(model.id).some((variantId) => customIds.has(variantId)) && (
+                      !thinkingVariantIds(model.id).some((variantId) => groupIds.has(variantId)) && (
                         <button
                           disabled={updating.has(model.id)}
                           onClick={() => void addVariants(model)}
-                          title="添加 -thinking、-thinking-low/medium/high/xhigh/max 变种"
+                          title={
+                            model.custom
+                              ? "添加 -thinking、-thinking-low/medium/high/xhigh/max 变种"
+                              : "为内置模型添加 -thinking、-thinking-low/medium/high/xhigh/max 变种（变种作为自定义条目保存，可单独删除）"
+                          }
                           className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
                         >
                           添加思考变种
+                        </button>
+                      )}
+                    {!model.custom &&
+                      !isThinkingVariantId(model.id) &&
+                      thinkingVariantIds(model.id).some((variantId) => customIds.has(variantId)) && (
+                        <button
+                          disabled={updating.has(model.id)}
+                          onClick={() => void removeVariants(model.id)}
+                          title="删除为该内置模型添加的思考变种，模型本身保留"
+                          className="text-xs text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40"
+                        >
+                          删除思考变种
                         </button>
                       )}
                     {model.custom && (

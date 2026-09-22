@@ -80,7 +80,7 @@ Provider also strips unsupported params (`temperature`, `top_p`, `presence_penal
 
 Claude adaptive-thinking families (`claude-opus-5`, `claude-opus-4-7`/`4.8`, `claude-fable-5`, `claude-sonnet-5`, and via OpenRouter also `anthropic/claude-fable-latest`) are matched by **family prefix**, so point releases and dated ids (`claude-fable-5.1`, `anthropic/claude-fable-5.1`, `claude-opus-4-7-20250514`) are covered automatically — including `anthropic/*` ids added at runtime from the OpenRouter catalog. The same `-thinking-{level}` suffix works on them (e.g. `anthropic/claude-fable-5.1-thinking-low`). On the direct Anthropic path it is sent as `thinking: {type: "adaptive"}` + `output_config.effort`. On the OpenRouter path it is sent as OpenRouter's unified `reasoning: {effort}` (legacy models: `reasoning: {max_tokens}`), because OpenRouter's Chat Completions endpoint ignores Anthropic-native `thinking`/`output_config` and would leave the model at its default effort. `temperature`/`top_p`/`top_k` are stripped because these models reject them. Note the gateway only reads the thinking level from the model-name suffix, not from a body-level `reasoning_effort`.
 
-Other OpenRouter models (Qwen, GLM, Kimi, Grok, Gemini, … including ids added at runtime from the catalog) also accept the `-thinking-{level}` suffix; the gateway sends it as OpenRouter's unified `reasoning: {effort}` (`max` → `xhigh`, bare `-thinking` → `high`). It used to send an Anthropic-style `reasoning: {max_tokens}` budget, which effort-only models such as `qwen/qwen3.8-max-0902` ignore, leaving them at their catalog default (`xhigh`, reasoning mandatory) — that is why `-thinking-low` had no visible effect there. Only pre-adaptive Claude families still get the `reasoning: {max_tokens}` budget. A model whose OpenRouter descriptor marks reasoning `mandatory` cannot be switched off by the gateway: the bare id runs at the provider default, so pick `-thinking-low` to shorten it.
+Other OpenRouter models (Qwen, GLM, Kimi, Grok, Gemini, … including ids added at runtime from the catalog) also accept the `-thinking-{level}` suffix; the gateway sends it as OpenRouter's unified `reasoning: {effort}` with the level passed through unchanged (bare `-thinking` → `high`); OpenRouter maps a level the model lacks to its nearest supported one, so `-thinking-max` reaches `moonshotai/kimi-k3` (max/high/low) as `max` and lands on `xhigh` for `qwen/qwen3.8-max-0902`. It used to send an Anthropic-style `reasoning: {max_tokens}` budget, which effort-only models such as `qwen/qwen3.8-max-0902` ignore, leaving them at their catalog default (`xhigh`, reasoning mandatory) — that is why `-thinking-low` had no visible effect there. Only pre-adaptive Claude families still get the `reasoning: {max_tokens}` budget. A model whose OpenRouter descriptor marks reasoning `mandatory` cannot be switched off by the gateway: the bare id runs at the provider default, so pick `-thinking-low` to shorten it.
 
 ### OpenRouter provider pinning
 
@@ -106,7 +106,8 @@ catalog and lets the operator pick which models to add:
   unreachable it falls back to `<configured openrouter baseUrl>/models`; if both fail a
   stale cache is served rather than an error. The response reports which `source` was used.
 - Added models are stored with `provider: "openrouter"` and are deletable from the portal.
-  Built-in models can only be disabled, never deleted (DELETE returns 404 for them).
+  Built-in models can only be disabled, never deleted (DELETE returns 404 for them, unless
+  `thinking_variants: true` finds operator-added variants to remove — see below).
 - Adding an id clears it from `disabled_models.json`, so a freshly added model shows up on
   `/v1/models` immediately.
 - Cap: `MAX_CUSTOM_MODELS` (2000) total, 500 base ids per POST.
@@ -116,6 +117,12 @@ catalog and lets the operator pick which models to add:
   choose a thinking level without typing the suffix. The portal exposes this as the
   「同时添加思考变种」checkbox. DELETE accepts the same flag to remove a base id together
   with its operator-added variants (the portal does this automatically when variants exist).
+- The base id may be a built-in OpenRouter model (e.g. `moonshotai/kimi-k3`, which ships
+  without variants): POST skips the base as `builtin` and stores only the six variants as
+  custom entries; DELETE with the flag removes just those variants and keeps the base. The
+  portal's model list shows「添加思考变种」on built-in OpenRouter models that have no
+  variants yet and「删除思考变种」once they do. The catalog panel can't be used for this
+  because it marks built-in ids as「已在列表」.
 
 ## Reverse-Proxy Forwarding Mode
 

@@ -77,7 +77,10 @@ router.get("/v1/admin/openrouter/models", requireAuth, async (req, res) => {
  *
  * `thinking_variants: true` (request-level, or per `models[]` item) also
  * registers `<id>-thinking` and `<id>-thinking-{low,medium,high,xhigh,max}`
- * right after each base id, mirroring the built-in Claude entries.
+ * right after each base id, mirroring the built-in Claude entries. The base id
+ * may be a built-in model (it is then reported in `skipped` as `builtin`) so
+ * variants can be added to built-in OpenRouter entries such as
+ * `moonshotai/kimi-k3`; the variants themselves are stored as custom models.
  */
 router.post("/v1/admin/models", requireAuth, (req, res) => {
   const body = (req.body ?? {}) as {
@@ -165,7 +168,10 @@ router.patch("/v1/admin/models", requireAuth, (req, res) => {
 /**
  * Delete an operator-added model. Built-in models can only be disabled.
  * `thinking_variants: true` (body, or `?thinking_variants=1`) also removes the
- * operator-added `-thinking*` variants registered for that base id.
+ * operator-added `-thinking*` variants registered for that base id. For a
+ * built-in base id (e.g. `moonshotai/kimi-k3`) that leaves the base in place
+ * and removes only its operator-added variants; 404 only when nothing at all
+ * was removable.
  */
 router.delete("/v1/admin/models", requireAuth, (req, res) => {
   const fromBody = (req.body ?? {}) as { id?: unknown; thinking_variants?: unknown };
@@ -184,17 +190,18 @@ router.delete("/v1/admin/models", requireAuth, (req, res) => {
     res.status(400).json({ error: { message: "id is required" } });
     return;
   }
-  if (!removeCustomModel(id)) {
-    res.status(404).json({
-      error: { message: `"${id}" is not an operator-added model and cannot be deleted` },
-    });
-    return;
-  }
-  const removed = [id];
+  const removed: string[] = [];
+  if (removeCustomModel(id)) removed.push(id);
   if (withVariants && !isThinkingVariantId(id)) {
     for (const variantId of thinkingVariantIds(id)) {
       if (removeCustomModel(variantId)) removed.push(variantId);
     }
+  }
+  if (removed.length === 0) {
+    res.status(404).json({
+      error: { message: `"${id}" is not an operator-added model and cannot be deleted` },
+    });
+    return;
   }
   res.json({ ok: true, removed });
 });
