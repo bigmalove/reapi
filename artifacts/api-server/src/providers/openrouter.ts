@@ -233,8 +233,8 @@ export async function callOpenRouter(
       : "high";
     body["thinking"] = { type: "enabled" };
     body["reasoning_effort"] = effort;
-  } else if (thinkingEnabled && !isOpenAIReasoningModel) {
-    // Legacy budget_tokens thinking (skip for OpenAI — already handled above).
+  } else if (thinkingEnabled && isClaude) {
+    // Legacy Claude budget_tokens thinking (pre-adaptive families).
     // OpenRouter forwards `reasoning.max_tokens` to Anthropic as budget_tokens,
     // which must be >= 1024 and below max_tokens; ensure max_tokens is high enough.
     const effectiveMax = Math.max(maxTokens, 2048);
@@ -245,6 +245,25 @@ export async function callOpenRouter(
     const budgetTokens = Math.max(rawBudget, 1024);
     body["reasoning"] = { max_tokens: budgetTokens };
     delete body["temperature"];
+  } else if (thinkingEnabled && !isOpenAIReasoningModel) {
+    // Any other model (Qwen, GLM, Kimi, Grok, Gemini, … added from the
+    // OpenRouter catalog): use OpenRouter's unified `reasoning.effort`.
+    // Most of these are effort-only — their catalog `reasoning` descriptor
+    // lists `supported_efforts` without `supports_max_tokens` — so the
+    // Anthropic-style `reasoning.max_tokens` budget we used to send here was
+    // ignored and the model stayed at its default effort (e.g.
+    // qwen/qwen3.8-max-0902 defaults to `xhigh` with reasoning mandatory).
+    // OpenRouter converts effort → budget itself for budget-only models.
+    // `max` is not in most models' accepted set, so it is sent as `xhigh`.
+    const GENERIC_EFFORT_MAP: Record<string, string> = {
+      low:    "low",
+      medium: "medium",
+      high:   "high",
+      xhigh:  "xhigh",
+      max:    "xhigh",
+    };
+    const effort = explicitEffort ? (GENERIC_EFFORT_MAP[explicitEffort] ?? "high") : "high";
+    body["reasoning"] = { effort };
   }
 
   const outboundHeaders: Record<string, string> = {
