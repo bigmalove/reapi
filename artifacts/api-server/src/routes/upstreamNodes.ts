@@ -3,13 +3,14 @@ import {
   getSettings,
   updateSettings,
   disableUpstreamNode,
+  restoreDisabledNodes,
   REPLIT_HOSTING_SHUTDOWN,
   NODE_PROBE_OFFLINE,
   type DisabledUpstreamNode,
   type UpstreamNodeType,
 } from "../lib/settings.js";
 import { getActiveCooldowns } from "../lib/providerEndpoint.js";
-import { probeNodes } from "../lib/nodeProbe.js";
+import { probeNodes, probeNodeLlm } from "../lib/nodeProbe.js";
 import { requireAuth } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
@@ -271,17 +272,7 @@ router.post("/api/upstream-nodes/re-enable", (req, res) => {
     return;
   }
 
-  const newDisabled = settings.disabledUpstreamNodes.filter((e) => e.url !== rawUrl);
-  const alreadyInPool = settings.reverseProxyPool.some((e) => e.url === rawUrl);
-  const newPool = alreadyInPool
-    ? settings.reverseProxyPool
-    : [...settings.reverseProxyPool, { url: rawUrl, apiKey: "" }];
-
-  updateSettings({
-    disabledUpstreamNodes: newDisabled,
-    reverseProxyPool: newPool,
-    reverseProxyEnabled: true,
-  });
+  restoreDisabledNodes([rawUrl]);
 
   res.json({ re_enabled: true, url: rawUrl });
 });
@@ -314,6 +305,28 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
   }
 
   res.json({ results, disabled });
+});
+
+// Send a real (1-token) LLM call through every disabled node and restore the
+// ones that answer. Dev nodes are skipped — they need a wakeup, not a check.
+router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {
+  const settings = getSettings();
+  const urls = settings.disabledUpstreamNodes
+    .filter((e) => e.type !== "replit-dev")
+    .map((e) => e.url);
+  // Disabled entries carry no key of their own; once restored they inherit
+  // pool[0]'s key, so test with that.
+  const apiKey = settings.reverseProxyPool[0]?.apiKey ?? "";
+  const results = await probeNodes(urls, (url) => probeNodeLlm(url, apiKey));
+
+  const stillDisabled = new Set(getSettings().disabledUpstreamNodes.map((e) => e.url));
+  const restored = results.filter((r) => r.online && stillDisabled.has(r.url)).map((r) => r.url);
+  for (const url of restored) {
+    logger.info({ nodeUrl: url }, "disabled upstream node passed LLM check — restoring to pool");
+  }
+  restoreDisabledNodes(restored);
+
+  res.json({ results, restored });
 });
 
 export default router;

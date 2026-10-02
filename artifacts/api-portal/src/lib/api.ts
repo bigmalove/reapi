@@ -336,6 +336,16 @@ export async function checkUpstreamNodes(): Promise<{ results: NodeCheckResult[]
   return res.json();
 }
 
+/** Send a 1-token LLM call through every disabled node; passing ones are restored server-side. */
+export async function checkDisabledUpstreamNodes(): Promise<{ results: NodeCheckResult[]; restored: string[] }> {
+  const res = await fetch(`${API_BASE}/upstream-nodes/check-disabled`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
 export interface CopyFromResult {
   poolEntries: Array<{ url: string }>;
   disabledNodesImported: number;

@@ -290,34 +290,37 @@ export function disableUpstreamNode(args: {
  * writes settings when something actually changed. Returns the restored URLs.
  */
 export function restoreExpiredDisabledNodes(now: number = Date.now()): string[] {
-  const settings = getSettings();
-  const restored: string[] = [];
-  const keep: DisabledUpstreamNode[] = [];
-
-  for (const entry of settings.disabledUpstreamNodes) {
+  const due = getSettings().disabledUpstreamNodes.filter((entry) => {
     const recoverMs = entry.recoverAt !== undefined ? Date.parse(entry.recoverAt) : NaN;
-    if (entry.type === "replit-app" && !Number.isNaN(recoverMs) && recoverMs <= now) {
-      restored.push(entry.url);
-    } else {
-      keep.push(entry);
-    }
-  }
+    return entry.type === "replit-app" && !Number.isNaN(recoverMs) && recoverMs <= now;
+  });
+  if (due.length === 0) return [];
 
-  if (restored.length === 0) return restored;
-
-  const pool = [...settings.reverseProxyPool];
+  const restored = due.map((e) => e.url);
   for (const url of restored) {
-    if (!pool.some((e) => e.url === url)) pool.push({ url, apiKey: "" });
     logger.info({ nodeUrl: url }, "disabled upstream node reached its recovery time — restoring to pool");
   }
+  restoreDisabledNodes(restored);
+  return restored;
+}
 
+/**
+ * Move the given nodes from disabledUpstreamNodes back into the pool (blank
+ * apiKey, inheriting pool[0]'s key) and switch the proxy back on.
+ */
+export function restoreDisabledNodes(urls: string[]): void {
+  if (urls.length === 0) return;
+  const settings = getSettings();
+  const restore = new Set(urls);
+  const pool = [...settings.reverseProxyPool];
+  for (const url of urls) {
+    if (!pool.some((e) => e.url === url)) pool.push({ url, apiKey: "" });
+  }
   updateSettings({
     reverseProxyPool: pool,
-    disabledUpstreamNodes: keep,
+    disabledUpstreamNodes: settings.disabledUpstreamNodes.filter((e) => !restore.has(e.url)),
     reverseProxyEnabled: true,
   });
-
-  return restored;
 }
 
 export function updateSettings(patch: Partial<ServerSettings>): ServerSettings {

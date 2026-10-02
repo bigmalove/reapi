@@ -147,6 +147,8 @@ Note `gemini` provider maps to upstream segment `google`.
 
 **Node status check**: the portal's「检测节点状态」button calls `POST /api/upstream-nodes/check` (auth required), which GETs `<node>/healthz` for every pool entry (10s timeout, 8 at a time; see `artifacts/api-server/src/lib/nodeProbe.ts`). A node counts as offline only on a connection error/timeout, a Replit hosting placeholder page, or a 502/503/504; offline nodes are disabled with `upstreamReason` `probe-offline` (or `replit-hosting-shutdown`) and come back on their next self-registration or via「重新启用」. The probe uses no model quota, so it cannot detect budget-exhausted nodes — those are still caught by real requests.
 
+**Disabled-node recovery check**: the blocked-nodes panel's「检测并恢复」button calls `POST /api/upstream-nodes/check-disabled` (auth required). It sends a real 1-token message (`claude-haiku-4-5`, `max_tokens: 1`, 30s timeout) to `<node>/modelfarm/anthropic/v1/messages` on every disabled non-Dev node, using pool[0]'s key (which restored nodes inherit). Nodes that return a valid message are moved back into the pool via `restoreDisabledNodes()`; the rest stay disabled. This costs a tiny amount of quota per node but does catch budget-exhausted nodes.
+
 **Key preservation**: Pool POST is atomic-replace, but a row resubmitted with the *same* URL and blank `apiKey` keeps its previously stored key. Changing a row's URL drops the prior key — the new URL needs an explicit key.
 
 **Legacy compat**: PATCH `/api/settings` still accepts the old scalar `reverseProxyUrl`/`reverseProxyApiKey` and maps them onto pool[0]. Override-only legacy configs (no global URL but a global key) get the legacy key applied to every override URL that lacks its own key. GET responses expose only the new pool shape.

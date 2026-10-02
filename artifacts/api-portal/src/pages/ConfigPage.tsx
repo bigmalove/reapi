@@ -7,6 +7,7 @@ import {
   fetchUpstreamNodesFrom,
   fetchCooldowns,
   checkUpstreamNodes,
+  checkDisabledUpstreamNodes,
   verifyKey,
   setClientKey,
   getApiKey,
@@ -120,6 +121,9 @@ export default function ConfigPage() {
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<{ results: NodeCheckResult[]; disabled: string[] } | null>(null);
   const [checkErr, setCheckErr] = useState("");
+  const [checkingDisabled, setCheckingDisabled] = useState(false);
+  const [checkDisabledResult, setCheckDisabledResult] = useState<{ results: NodeCheckResult[]; restored: string[] } | null>(null);
+  const [checkDisabledErr, setCheckDisabledErr] = useState("");
 
   // Cooldowns state (nodeUrl → remaining ms)
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
@@ -454,6 +458,21 @@ export default function ConfigPage() {
       setCheckErr(String(e));
     } finally {
       setChecking(false);
+    }
+  }
+
+  async function handleCheckDisabled() {
+    setCheckingDisabled(true);
+    setCheckDisabledErr("");
+    setCheckDisabledResult(null);
+    try {
+      const result = await checkDisabledUpstreamNodes();
+      setCheckDisabledResult(result);
+      if (result.restored.length > 0) await refreshAll();
+    } catch (e) {
+      setCheckDisabledErr(String(e));
+    } finally {
+      setCheckingDisabled(false);
     }
   }
 
@@ -880,7 +899,7 @@ export default function ConfigPage() {
       </div>
 
       {/* Disabled Upstream Nodes */}
-      {settings && settings.disabledUpstreamNodes && settings.disabledUpstreamNodes.length > 0 && (
+      {settings && settings.disabledUpstreamNodes && (settings.disabledUpstreamNodes.length > 0 || checkDisabledResult) && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-5 space-y-4">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -890,16 +909,48 @@ export default function ConfigPage() {
               </p>
             </div>
             {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.type !== "replit-dev") && (
-              <button
-                type="button"
-                disabled={reEnablingAll || reEnablingUrl !== null}
-                onClick={handleReEnableAll}
-                className="shrink-0 rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
-              >
-                {reEnablingAll ? "处理中..." : "全部重新启用"}
-              </button>
+              <div className="flex shrink-0 gap-2">
+                <button
+                  type="button"
+                  disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
+                  onClick={handleCheckDisabled}
+                  title="对每个被屏蔽节点发一次极小的 LLM 请求（claude-haiku-4-5，1 token），能正常返回的自动恢复至代理池"
+                  className="rounded-md bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
+                >
+                  {checkingDisabled ? "检测中..." : "检测并恢复"}
+                </button>
+                <button
+                  type="button"
+                  disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
+                  onClick={handleReEnableAll}
+                  className="rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                >
+                  {reEnablingAll ? "处理中..." : "全部重新启用"}
+                </button>
+              </div>
             )}
           </div>
+
+          {checkDisabledErr && <p className="text-xs text-destructive">检测失败：{checkDisabledErr}</p>}
+          {checkDisabledResult && (
+            <div className="rounded-md border border-amber-500/20 bg-secondary/10 p-3 space-y-1.5 text-xs">
+              <div className="text-foreground">
+                已检测 {checkDisabledResult.results.length} 个节点：
+                <span className="text-green-400">可调用 LLM 并已恢复 {checkDisabledResult.restored.length}</span>
+                ，
+                <span className="text-muted-foreground">
+                  仍不可用 {checkDisabledResult.results.filter((r) => !r.online).length}
+                </span>
+              </div>
+              {checkDisabledResult.results
+                .filter((r) => !r.online)
+                .map((r) => (
+                  <div key={r.url} className="text-[11px] text-muted-foreground break-all">
+                    <span className="font-mono text-foreground">{r.url}</span> — {r.error}
+                  </div>
+                ))}
+            </div>
+          )}
 
           {/* Collapsible header for disabled nodes */}
           <button
