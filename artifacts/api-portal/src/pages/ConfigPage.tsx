@@ -431,7 +431,7 @@ export default function ConfigPage() {
   async function handleReEnableAll() {
     if (!settings) return;
     const nonDevNodes = settings.disabledUpstreamNodes.filter(
-      (n: DisabledUpstreamNode) => n.type !== "replit-dev",
+      (n: DisabledUpstreamNode) => n.disabledReason !== "requires-wakeup",
     );
     if (nonDevNodes.length === 0) return;
     setReEnablingAll(true);
@@ -908,17 +908,17 @@ export default function ConfigPage() {
                 以下节点因出错被自动屏蔽。可点击"重新启用"将其恢复至代理池。免费额度耗尽的节点会在 31 天后自动恢复，也可手动提前启用。
               </p>
             </div>
-            {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.type !== "replit-dev") && (
-              <div className="flex shrink-0 gap-2">
-                <button
-                  type="button"
-                  disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
-                  onClick={handleCheckDisabled}
-                  title="对每个被屏蔽节点发一次极小的 LLM 请求（claude-haiku-4-5，1 token），能正常返回的自动恢复至代理池"
-                  className="rounded-md bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
-                >
-                  {checkingDisabled ? "检测中..." : "检测并恢复"}
-                </button>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
+                onClick={handleCheckDisabled}
+                title="对每个被屏蔽节点发一次极小的 LLM 请求（claude-haiku-4-5，1 token），能正常返回的自动恢复至代理池"
+                className="rounded-md bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
+              >
+                {checkingDisabled ? "检测中..." : "检测并恢复"}
+              </button>
+              {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.disabledReason !== "requires-wakeup") && (
                 <button
                   type="button"
                   disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
@@ -927,8 +927,8 @@ export default function ConfigPage() {
                 >
                   {reEnablingAll ? "处理中..." : "全部重新启用"}
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           {checkDisabledErr && <p className="text-xs text-destructive">检测失败：{checkDisabledErr}</p>}
@@ -970,7 +970,6 @@ export default function ConfigPage() {
               {settings.disabledUpstreamNodes
                 .filter((node: DisabledUpstreamNode) => node.disabledReason !== "requires-wakeup")
                 .map((node: DisabledUpstreamNode) => {
-                  const isDev = node.type === "replit-dev";
                   const reasonLabel =
                     node.disabledReason === "upstream-node-unavailable"
                       ? "上游节点不可用"
@@ -1022,16 +1021,14 @@ export default function ConfigPage() {
                             </div>
                           )}
                         </div>
-                        {!isDev && (
-                          <button
-                            type="button"
-                            disabled={reEnablingUrl === node.url}
-                            onClick={() => handleReEnable(node.url)}
-                            className="shrink-0 rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
-                          >
-                            {reEnablingUrl === node.url ? "处理中..." : "重新启用"}
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          disabled={reEnablingUrl === node.url}
+                          onClick={() => handleReEnable(node.url)}
+                          className="shrink-0 rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                        >
+                          {reEnablingUrl === node.url ? "处理中..." : "重新启用"}
+                        </button>
                       </div>
                     </div>
                   );

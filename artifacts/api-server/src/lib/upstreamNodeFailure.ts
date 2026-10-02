@@ -25,6 +25,25 @@ const BUDGET_EXCEEDED_PATTERNS: RegExp[] = [
   /upgrade to a paid plan/i,
 ];
 
+/**
+ * Detect a Replit page served in place of a node whose process is not running:
+ *  - the hosting placeholder ("This app isn't live yet") for a stopped or
+ *    undeployed `.replit.app` deployment, and
+ *  - the "Run this app to see the results here." page for a `.replit.dev`
+ *    workspace that is not running.
+ * Both arrive as 404s that would otherwise look like an app without the route.
+ * Returns a human-readable error, or null.
+ */
+export function detectReplitNotRunning(body: string): string | null {
+  if (body.includes("replit.com/site/hosting")) {
+    return "Replit deployment is not live (hosting placeholder page returned)";
+  }
+  if (body.includes("Run this app to see the results here")) {
+    return "Replit dev workspace is not running (\"Run this app\" page returned)";
+  }
+  return null;
+}
+
 /** Pull `error.message` (or a top-level `message`) out of a JSON error body. */
 function extractErrorMessage(body: string): string | undefined {
   try {
@@ -121,29 +140,29 @@ export function maybeDisableSelectedNode(args: {
   if (endpoint.source !== "upstream") return;
   if (!endpoint.nodeUrl) return;
 
-  // Replit hosting placeholder page ("This app isn't live yet"): the deployment
-  // is stopped, undeployed, or was never deployed, so Replit's edge serves an
-  // HTML page containing a hosting link in place of the node. This is NOT a
-  // billing failure — an account over its budget stays deployed and answers with
+  // Replit placeholder page (see detectReplitNotRunning): the deployment is
+  // stopped/undeployed or the dev workspace is not running, so Replit's edge
+  // serves an HTML page in place of the node. This is NOT a billing failure — an account over its budget stays deployed and answers with
   // a 403 carrying FREE_TIER_BUDGET_EXCEEDED, handled further down.
   // Replit serves the placeholder as a 404, and every caller invokes this only
   // for a non-ok response — but the status is not part of the match, since the
   // page is what identifies it, not the code it happens to arrive with.
-  if (responseBody.includes("replit.com/site/hosting")) {
+  const notRunning = detectReplitNotRunning(responseBody);
+  if (notRunning) {
     logger.warn(
       {
         nodeUrl: endpoint.nodeUrl,
         upstreamStatus: responseStatus,
-        message: "Replit hosting placeholder page detected",
+        message: notRunning,
       },
-      "upstream node is not deployed — removing node from pool",
+      "upstream node is not running — removing node from pool",
     );
     disableUpstreamNode({
       url: endpoint.nodeUrl,
       disabledReason: "upstream-node-unavailable",
       upstreamReason: REPLIT_HOSTING_SHUTDOWN,
       upstreamStatus: responseStatus,
-      lastError: "Replit deployment is not live (hosting placeholder page returned)",
+      lastError: notRunning,
     });
     return;
   }

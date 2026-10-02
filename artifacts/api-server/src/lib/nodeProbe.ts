@@ -1,4 +1,5 @@
 import { REPLIT_HOSTING_SHUTDOWN, NODE_PROBE_OFFLINE } from "./settings.js";
+import { detectReplitNotRunning } from "./upstreamNodeFailure.js";
 
 const PROBE_TIMEOUT_MS = 10_000;
 const LLM_PROBE_TIMEOUT_MS = 30_000;
@@ -21,7 +22,8 @@ export interface NodeProbeResult {
  * account is out of budget — those are caught by real requests instead
  * (upstreamNodeFailure.ts). A node counts as offline only when:
  *  - the request fails outright (DNS, connection refused, timeout),
- *  - Replit serves its hosting placeholder page (deployment not live), or
+ *  - Replit serves a placeholder page instead of the app (deployment not
+ *    live, or dev workspace not running — see detectReplitNotRunning), or
  *  - Replit's edge answers 502/503/504 (app not responding).
  * Any other response, including 401/404 from the node app, means it is up.
  */
@@ -36,12 +38,9 @@ export async function probeNode(url: string): Promise<NodeProbeResult> {
     const latencyMs = Date.now() - started;
     const status = response.status;
 
-    if (body.includes("replit.com/site/hosting")) {
-      return {
-        url, online: false, status, latencyMs,
-        reason: REPLIT_HOSTING_SHUTDOWN,
-        error: "Replit deployment is not live (hosting placeholder page returned)",
-      };
+    const notRunning = detectReplitNotRunning(body);
+    if (notRunning) {
+      return { url, online: false, status, latencyMs, reason: REPLIT_HOSTING_SHUTDOWN, error: notRunning };
     }
     if (status === 502 || status === 503 || status === 504) {
       return {
