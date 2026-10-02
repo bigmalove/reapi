@@ -431,7 +431,7 @@ export default function ConfigPage() {
   async function handleReEnableAll() {
     if (!settings) return;
     const nonDevNodes = settings.disabledUpstreamNodes.filter(
-      (n: DisabledUpstreamNode) => n.disabledReason !== "requires-wakeup",
+      (n: DisabledUpstreamNode) => n.type !== "replit-dev",
     );
     if (nonDevNodes.length === 0) return;
     setReEnablingAll(true);
@@ -909,24 +909,26 @@ export default function ConfigPage() {
               </p>
             </div>
             <div className="flex shrink-0 gap-2">
-              <button
-                type="button"
-                disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
-                onClick={handleCheckDisabled}
-                title="对每个被屏蔽节点发一次极小的 LLM 请求（claude-haiku-4-5，1 token），能正常返回的自动恢复至代理池"
-                className="rounded-md bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
-              >
-                {checkingDisabled ? "检测中..." : "检测并恢复"}
-              </button>
-              {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.disabledReason !== "requires-wakeup") && (
-                <button
-                  type="button"
-                  disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
-                  onClick={handleReEnableAll}
-                  className="rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
-                >
-                  {reEnablingAll ? "处理中..." : "全部重新启用"}
-                </button>
+              {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.type !== "replit-dev") && (
+                <>
+                  <button
+                    type="button"
+                    disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
+                    onClick={handleCheckDisabled}
+                    title="对每个被屏蔽节点发一次极小的 LLM 请求（claude-haiku-4-5，1 token），能正常返回的自动恢复至代理池；Dev 节点不检测"
+                    className="rounded-md bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
+                  >
+                    {checkingDisabled ? "检测中..." : "检测并恢复"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={checkingDisabled || reEnablingAll || reEnablingUrl !== null}
+                    onClick={handleReEnableAll}
+                    className="rounded-md bg-amber-500/20 border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                  >
+                    {reEnablingAll ? "处理中..." : "全部重新启用"}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -968,7 +970,7 @@ export default function ConfigPage() {
             <div className="space-y-3">
               {/* Regular disabled nodes (non-wakeup) */}
               {settings.disabledUpstreamNodes
-                .filter((node: DisabledUpstreamNode) => node.disabledReason !== "requires-wakeup")
+                .filter((node: DisabledUpstreamNode) => node.type !== "replit-dev")
                 .map((node: DisabledUpstreamNode) => {
                   const reasonLabel =
                     node.disabledReason === "upstream-node-unavailable"
@@ -1035,7 +1037,7 @@ export default function ConfigPage() {
                 })}
 
               {/* Secondary collapsible: wakeup (Dev) nodes */}
-              {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.disabledReason === "requires-wakeup") && (
+              {settings.disabledUpstreamNodes.some((n: DisabledUpstreamNode) => n.type === "replit-dev") && (
                 <div className="rounded-md border border-blue-500/20 bg-blue-500/5">
                   <button
                     type="button"
@@ -1044,7 +1046,7 @@ export default function ConfigPage() {
                   >
                     <span className="font-medium">
                       需要唤醒 (Dev 节点) &mdash;{" "}
-                      {settings.disabledUpstreamNodes.filter((n: DisabledUpstreamNode) => n.disabledReason === "requires-wakeup").length} 个
+                      {settings.disabledUpstreamNodes.filter((n: DisabledUpstreamNode) => n.type === "replit-dev").length} 个
                     </span>
                     <span className="text-blue-400/70">{wakeupExpanded ? "▲ 收起" : "▼ 展开"}</span>
                   </button>
@@ -1052,7 +1054,7 @@ export default function ConfigPage() {
                   {wakeupExpanded && (
                     <div className="px-3 pb-3 space-y-2">
                       {settings.disabledUpstreamNodes
-                        .filter((node: DisabledUpstreamNode) => node.disabledReason === "requires-wakeup")
+                        .filter((node: DisabledUpstreamNode) => node.type === "replit-dev")
                         .map((node: DisabledUpstreamNode) => (
                           <div
                             key={node.url}

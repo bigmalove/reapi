@@ -266,9 +266,7 @@ router.post("/api/upstream-nodes/re-enable", (req, res) => {
     return;
   }
 
-  // Dev nodes that only registered (requires-wakeup) were never in the pool;
-  // a dev node disabled after failing in the pool can be put back like any other.
-  if (disabledEntry.disabledReason === "requires-wakeup") {
+  if (disabledEntry.type === "replit-dev") {
     res.status(400).json({ error: { message: "Dev nodes cannot be re-enabled manually — they require a wakeup", type: "validation_error" } });
     return;
   }
@@ -308,12 +306,13 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
   res.json({ results, disabled });
 });
 
-// Send a real (1-token) LLM call through every disabled node — dev nodes
-// included, since a dev workspace that answers is awake — and restore the
-// ones that answer.
+// Send a real (1-token) LLM call through every disabled node and restore the
+// ones that answer. Dev nodes are skipped — they are always kept disabled.
 router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {
   const settings = getSettings();
-  const urls = settings.disabledUpstreamNodes.map((e) => e.url);
+  const urls = settings.disabledUpstreamNodes
+    .filter((e) => e.type !== "replit-dev")
+    .map((e) => e.url);
   // Disabled entries carry no key of their own; once restored they inherit
   // pool[0]'s key, so test with that.
   const apiKey = settings.reverseProxyPool[0]?.apiKey ?? "";

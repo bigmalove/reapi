@@ -180,6 +180,38 @@ function normalizeDisabledNodes(raw: unknown): DisabledUpstreamNode[] {
   return out;
 }
 
+/** `.replit.dev` workspace URLs — temporary nodes that sleep when idle. */
+export function isDevNodeUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.toLowerCase().endsWith(".replit.dev");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dev nodes are never served from: move any `.replit.dev` URL out of the pool
+ * into disabledUpstreamNodes (as requires-wakeup, unless already listed).
+ * Status checks skip them as well.
+ */
+function divertDevNodes(
+  pool: PoolEntry[],
+  disabled: DisabledUpstreamNode[],
+): { pool: PoolEntry[]; disabled: DisabledUpstreamNode[] } {
+  const dev = pool.filter((e) => isDevNodeUrl(e.url));
+  if (dev.length === 0) return { pool, disabled };
+  const listed = new Set(disabled.map((e) => e.url));
+  const added: DisabledUpstreamNode[] = dev
+    .filter((e) => !listed.has(e.url))
+    .map((e) => ({
+      url: e.url,
+      type: "replit-dev",
+      disabledReason: "requires-wakeup",
+      disabledAt: new Date().toISOString(),
+    }));
+  return { pool: pool.filter((e) => !isDevNodeUrl(e.url)), disabled: [...disabled, ...added] };
+}
+
 export async function initSettings(): Promise<void> {
   const loaded = await readJsonAsync<Record<string, unknown>>("server_settings.json", {});
   let pool = normalizePool(loaded["reverseProxyPool"]);
@@ -211,6 +243,9 @@ export async function initSettings(): Promise<void> {
     disabledUpstreamNodes: normalizeDisabledNodes(loaded["disabledUpstreamNodes"]),
     providerOverrides: normalizeOverrides(loaded["providerOverrides"]),
   };
+  const diverted = divertDevNodes(_settings.reverseProxyPool, _settings.disabledUpstreamNodes);
+  _settings.reverseProxyPool = diverted.pool;
+  _settings.disabledUpstreamNodes = diverted.disabled;
 }
 
 export function getSettings(): ServerSettings {
@@ -238,15 +273,7 @@ export function disableUpstreamNode(args: {
   const settings = getSettings();
   const url = args.url.trim().replace(/\/+$/, "");
 
-  // Determine node type from URL
-  let type: UpstreamNodeType = "replit-app";
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase();
-    if (hostname.endsWith(".replit.dev")) type = "replit-dev";
-  } catch {
-    // default to replit-app
-  }
+  const type: UpstreamNodeType = isDevNodeUrl(url) ? "replit-dev" : "replit-app";
 
   // Remove from active pool
   const newPool = settings.reverseProxyPool.filter((e) => e.url !== url);
@@ -339,7 +366,9 @@ export function updateSettings(patch: Partial<ServerSettings>): ServerSettings {
       seen.add(url);
       cleaned.push({ url, apiKey: e.apiKey ?? "" });
     }
-    next.reverseProxyPool = cleaned;
+    const diverted = divertDevNodes(cleaned, next.disabledUpstreamNodes);
+    next.reverseProxyPool = diverted.pool;
+    next.disabledUpstreamNodes = diverted.disabled;
   }
 
   if (patch.providerOverrides) {
