@@ -6,6 +6,7 @@ import {
   reEnableUpstreamNode,
   fetchUpstreamNodesFrom,
   fetchCooldowns,
+  checkUpstreamNodes,
   verifyKey,
   setClientKey,
   getApiKey,
@@ -17,6 +18,7 @@ import {
   type SettingsPatch,
   type PoolEntryPatch,
   type DisabledUpstreamNode,
+  type NodeCheckResult,
 } from "../lib/api";
 
 const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
@@ -113,6 +115,11 @@ export default function ConfigPage() {
   const [reEnablingUrl, setReEnablingUrl] = useState<string | null>(null);
   const [reEnableErr, setReEnableErr] = useState<string>("");
   const [reEnablingAll, setReEnablingAll] = useState(false);
+
+  // Node status check
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<{ results: NodeCheckResult[]; disabled: string[] } | null>(null);
+  const [checkErr, setCheckErr] = useState("");
 
   // Cooldowns state (nodeUrl → remaining ms)
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
@@ -435,6 +442,21 @@ export default function ConfigPage() {
     }
   }
 
+  async function handleCheckNodes() {
+    setChecking(true);
+    setCheckErr("");
+    setCheckResult(null);
+    try {
+      const result = await checkUpstreamNodes();
+      setCheckResult(result);
+      if (result.disabled.length > 0) await refreshAll();
+    } catch (e) {
+      setCheckErr(String(e));
+    } finally {
+      setChecking(false);
+    }
+  }
+
   async function copyFromMaster() {
     setCopyFromErr("");
     setCopyFromOk(null);
@@ -734,6 +756,16 @@ export default function ConfigPage() {
             {rpSaved ? "已保存!" : rpSaving ? "保存中..." : "保存代理池"}
           </button>
 
+          <button
+            type="button"
+            onClick={handleCheckNodes}
+            disabled={checking || (settings?.reverseProxyPool.length ?? 0) === 0}
+            title="逐个探测代理池中已保存的节点，离线节点会被自动屏蔽"
+            className="rounded-md border border-border bg-secondary/30 px-3 py-1.5 text-xs text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-50"
+          >
+            {checking ? "检测中..." : "检测节点状态"}
+          </button>
+
           {/* Export */}
           <button
             type="button"
@@ -767,6 +799,28 @@ export default function ConfigPage() {
             <span className="text-xs text-muted-foreground">已禁用 — 使用本地环境密钥</span>
           )}
         </div>
+
+        {checkErr && <p className="text-xs text-destructive">检测失败：{checkErr}</p>}
+        {checkResult && (
+          <div className="rounded-md border border-border/60 bg-secondary/10 p-3 space-y-1.5 text-xs">
+            <div className="text-foreground">
+              已检测 {checkResult.results.length} 个节点：
+              <span className="text-green-400">在线 {checkResult.results.filter((r) => r.online).length}</span>
+              ，
+              <span className={checkResult.disabled.length > 0 ? "text-amber-400" : "text-muted-foreground"}>
+                离线 {checkResult.results.filter((r) => !r.online).length}
+                {checkResult.disabled.length > 0 && `（已屏蔽 ${checkResult.disabled.length} 个）`}
+              </span>
+            </div>
+            {checkResult.results
+              .filter((r) => !r.online)
+              .map((r) => (
+                <div key={r.url} className="text-[11px] text-muted-foreground break-all">
+                  <span className="font-mono text-foreground">{r.url}</span> — {r.error}
+                </div>
+              ))}
+          </div>
+        )}
 
         {importOk && (
           <p className="text-xs text-green-400">✓ 导入成功（含屏蔽节点已并入草稿），请检查后点击"保存代理池"</p>
@@ -871,6 +925,7 @@ export default function ConfigPage() {
                       ? "上游节点不可用"
                       : node.disabledReason;
                   const isBudget = !!node.upstreamReason && /FREE_TIER|budget|spend/i.test(node.upstreamReason);
+                  const isOffline = node.upstreamReason === "probe-offline" || node.upstreamReason === "replit-hosting-shutdown";
                   const recoverMs = node.recoverAt ? Date.parse(node.recoverAt) : NaN;
                   const recoverLabel = Number.isNaN(recoverMs)
                     ? null
@@ -889,6 +944,11 @@ export default function ConfigPage() {
                             <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/15 text-amber-400">
                               {reasonLabel}
                             </span>
+                            {isOffline && (
+                              <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/10 text-amber-300/80">
+                                离线
+                              </span>
+                            )}
                             {isBudget && (
                               <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/10 text-amber-300/80">
                                 免费额度耗尽

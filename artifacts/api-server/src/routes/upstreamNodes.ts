@@ -1,6 +1,16 @@
 import { Router } from "express";
-import { getSettings, updateSettings, REPLIT_HOSTING_SHUTDOWN, type DisabledUpstreamNode, type UpstreamNodeType } from "../lib/settings.js";
+import {
+  getSettings,
+  updateSettings,
+  disableUpstreamNode,
+  REPLIT_HOSTING_SHUTDOWN,
+  NODE_PROBE_OFFLINE,
+  type DisabledUpstreamNode,
+  type UpstreamNodeType,
+} from "../lib/settings.js";
 import { getActiveCooldowns } from "../lib/providerEndpoint.js";
+import { probeNodes } from "../lib/nodeProbe.js";
+import { requireAuth } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
 const router = Router();
@@ -62,13 +72,15 @@ router.post("/api/upstream-nodes/register", (req, res) => {
     // heartbeats while broken and a registration proves nothing.
     //
     // Exceptions that fall through and restore the node:
-    //  - REPLIT_HOSTING_SHUTDOWN: the node had no process running at all, so it
-    //    could not have sent this request. Receiving one means the deployment
-    //    is live again.
+    //  - REPLIT_HOSTING_SHUTDOWN / NODE_PROBE_OFFLINE: the node had no process
+    //    running (or did not answer at all), so it could not have sent this
+    //    request. Receiving one means the deployment is live again.
     //  - `recoverAt` has passed: a time-boxed disable (free-tier monthly spend
     //    limit) whose window is over.
     const existingDisabled = settings.disabledUpstreamNodes.find((e) => e.url === rawUrl);
-    const wasShutDown = existingDisabled?.upstreamReason === REPLIT_HOSTING_SHUTDOWN;
+    const wasShutDown =
+      existingDisabled?.upstreamReason === REPLIT_HOSTING_SHUTDOWN ||
+      existingDisabled?.upstreamReason === NODE_PROBE_OFFLINE;
     const recovered =
       existingDisabled?.recoverAt !== undefined &&
       Date.parse(existingDisabled.recoverAt) <= Date.now();
@@ -272,6 +284,36 @@ router.post("/api/upstream-nodes/re-enable", (req, res) => {
   });
 
   res.json({ re_enabled: true, url: rawUrl });
+});
+
+// Probe every node in the active pool and disable the ones that are offline.
+// Only "no process answering" counts as offline (see nodeProbe.ts); any other
+// HTTP response leaves the node in the pool.
+router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
+  const urls = getSettings().reverseProxyPool.map((e) => e.url);
+  const results = await probeNodes(urls);
+
+  const disabled: string[] = [];
+  for (const r of results) {
+    if (r.online) continue;
+    // The pool may have changed while probing (e.g. the node got disabled by
+    // a failing request in the meantime) — only touch nodes still in it.
+    if (!getSettings().reverseProxyPool.some((e) => e.url === r.url)) continue;
+    logger.warn(
+      { nodeUrl: r.url, upstreamStatus: r.status, reason: r.reason, message: r.error },
+      "upstream node offline in status check — removing node from pool",
+    );
+    disableUpstreamNode({
+      url: r.url,
+      disabledReason: "upstream-node-unavailable",
+      upstreamReason: r.reason,
+      upstreamStatus: r.status,
+      lastError: r.error,
+    });
+    disabled.push(r.url);
+  }
+
+  res.json({ results, disabled });
 });
 
 export default router;

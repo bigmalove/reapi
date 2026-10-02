@@ -31,6 +31,14 @@ export type DisabledReason = "requires-wakeup" | "upstream-node-unavailable";
 export const REPLIT_HOSTING_SHUTDOWN = "replit-hosting-shutdown";
 
 /**
+ * `upstreamReason` for a node disabled by the manual status check because it
+ * did not answer at all (timeout, connection error, or a Replit edge 5xx).
+ * Like REPLIT_HOSTING_SHUTDOWN, an offline node cannot self-register, so an
+ * incoming registration means it is back online.
+ */
+export const NODE_PROBE_OFFLINE = "probe-offline";
+
+/**
  * How long a node stays disabled after its free-tier monthly spend limit is
  * exceeded. The quota is monthly, so the node is automatically restored to the
  * pool once this window has passed (see `restoreExpiredDisabledNodes`).

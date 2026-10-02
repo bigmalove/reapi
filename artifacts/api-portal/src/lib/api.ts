@@ -317,6 +317,25 @@ export async function reEnableUpstreamNode(url: string): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
+export interface NodeCheckResult {
+  url: string;
+  online: boolean;
+  status?: number;
+  latencyMs: number;
+  reason?: string;
+  error?: string;
+}
+
+/** Probe every pool node; offline ones are disabled server-side. */
+export async function checkUpstreamNodes(): Promise<{ results: NodeCheckResult[]; disabled: string[] }> {
+  const res = await fetch(`${API_BASE}/upstream-nodes/check`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
 export interface CopyFromResult {
   poolEntries: Array<{ url: string }>;
   disabledNodesImported: number;
