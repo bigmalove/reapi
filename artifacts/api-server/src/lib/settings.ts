@@ -67,6 +67,16 @@ export interface DisabledUpstreamNode {
 
 export interface ServerSettings {
   sillyTavernMode: boolean;
+  /**
+   * Synthetic stream shim for Antigravity-Gateway wrapped requests
+   * (`agw_emit_*` synthetic transport tool): re-encode the streamed answer
+   * into incremental tool_call argument deltas instead of forwarding the
+   * upstream's buffered single-chunk tool call.
+   *
+   * Overridable at request time — precedence: `x-agw-stream-shim` header
+   * (on/off) > `SYNTHETIC_STREAM_SHIM` env (on/off) > this setting (default on).
+   */
+  syntheticStreamShim: boolean;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PoolEntry[];
@@ -85,6 +95,7 @@ const EMPTY_OVERRIDES: ProviderOverrides = {
 
 const DEFAULTS: ServerSettings = {
   sillyTavernMode: false,
+  syntheticStreamShim: true,
   reverseProxyEnabled: false,
   reverseProxyMode: "sticky",
   reverseProxyPool: [],
@@ -237,6 +248,10 @@ export async function initSettings(): Promise<void> {
   _settings = {
     ...DEFAULTS,
     sillyTavernMode: typeof loaded["sillyTavernMode"] === "boolean" ? loaded["sillyTavernMode"] : DEFAULTS.sillyTavernMode,
+    syntheticStreamShim:
+      typeof loaded["syntheticStreamShim"] === "boolean"
+        ? loaded["syntheticStreamShim"]
+        : DEFAULTS.syntheticStreamShim,
     reverseProxyEnabled: typeof loaded["reverseProxyEnabled"] === "boolean" ? loaded["reverseProxyEnabled"] : DEFAULTS.reverseProxyEnabled,
     reverseProxyMode: normalizeMode(loaded["reverseProxyMode"]),
     reverseProxyPool: pool,

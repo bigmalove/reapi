@@ -23,6 +23,9 @@ const PASSTHROUGH_HEADERS = [
   "openai-organization",
   "openai-project",
   "x-goog-api-client",
+  // Per-request override for the synthetic stream shim (on/off). Used for
+  // A/B testing and client-side control; see lib/syntheticStreamShim.ts.
+  "x-agw-stream-shim",
 ] as const;
 
 function extractPassthroughHeaders(req: Request): Record<string, string> {

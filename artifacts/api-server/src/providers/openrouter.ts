@@ -1,6 +1,12 @@
 import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from "../types.js";
-import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
-import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
+import { resolveProviderEndpoint, type ProviderEndpoint } from "../lib/providerEndpoint.js";
+import { handleEmptyUpstreamStream, maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
+import { logger } from "../lib/logger.js";
+import {
+  planSyntheticStreamShim,
+  resolveShimEnabled,
+  wrapSyntheticToolStream,
+} from "../lib/syntheticStreamShim.js";
 
 // Map Bedrock/* shorthand IDs to real OpenRouter model IDs
 const BEDROCK_MODEL_MAP: Record<string, string> = {
@@ -261,6 +267,22 @@ export async function callOpenRouter(
     body["reasoning"] = { effort: explicitEffort ?? "high" };
   }
 
+  // Antigravity-Gateway synthetic transport: Google models on OpenRouter
+  // buffer the whole tool call (function arguments arrive as one chunk), so a
+  // wrapped answer would reach the client only at the end. When this is a pure
+  // text wrapper request, ask the model for plain text instead and re-encode
+  // the streamed text into incremental tool_call argument deltas — the client
+  // sees the same incremental tool stream an upstream with
+  // streamFunctionCallArguments would produce. Non-matching requests are
+  // untouched. Toggleable: portal setting (default on), `SYNTHETIC_STREAM_SHIM`
+  // env override, per-request `x-agw-stream-shim: on|off` header override.
+  // See lib/syntheticStreamShim.ts.
+  const shim =
+    request.stream && resolveShimEnabled(clientHeaders["x-agw-stream-shim"])
+      ? planSyntheticStreamShim(body)
+      : null;
+  const outboundBody = shim ? shim.body : body;
+
   const outboundHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${apiKey}`,
@@ -277,7 +299,7 @@ export async function callOpenRouter(
   const response = await fetch(url, {
     method: "POST",
     headers: outboundHeaders,
-    body: JSON.stringify(body),
+    body: JSON.stringify(outboundBody),
   });
 
   if (!response.ok) {
@@ -287,10 +309,50 @@ export async function callOpenRouter(
   }
 
   if (request.stream) {
-    return parseSSEStream(response);
+    const stream = parseSSEStream(response);
+    if (shim) {
+      logger.info(
+        { model: actualModel, tool: shim.toolName },
+        "synthetic stream shim active: re-encoding content into incremental tool_call arguments",
+      );
+      return ensureNonEmptyStream(wrapSyntheticToolStream(stream, shim.toolName), endpoint);
+    }
+    return ensureNonEmptyStream(stream, endpoint);
   }
 
   return (await response.json()) as ChatCompletionResponse;
+}
+
+/**
+ * Some upstream relays (observed on the Replit AI-integration path) give up on
+ * a streaming request when the model takes longer than their first-byte
+ * budget: the request comes back as HTTP 200 with an empty placeholder body,
+ * so the parsed stream ends without a single chunk. Forwarding that stream
+ * as-is reaches the client as a silent blank reply. Peek at the first chunk
+ * here instead: when the stream is empty, treat it as a transient node
+ * failure (cooldown + retry against another pool entry); otherwise hand back
+ * a regenerated stream that still carries the peeked chunk.
+ */
+async function ensureNonEmptyStream(
+  stream: AsyncIterable<StreamChunk>,
+  endpoint: ProviderEndpoint,
+): Promise<AsyncIterable<StreamChunk>> {
+  const iterator = stream[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  if (first.done) {
+    handleEmptyUpstreamStream(endpoint);
+    throw new Error(
+      "OpenRouter stream ended without emitting any chunks (upstream returned an empty placeholder response)",
+    );
+  }
+  return (async function* () {
+    yield first.value;
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) return;
+      yield next.value;
+    }
+  })();
 }
 
 async function* parseSSEStream(response: Response): AsyncIterable<StreamChunk> {

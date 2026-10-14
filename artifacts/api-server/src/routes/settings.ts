@@ -37,6 +37,7 @@ interface PublicDisabledNode {
 
 interface PublicSettings {
   sillyTavernMode: boolean;
+  syntheticStreamShim: boolean;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PublicPoolEntry[];
@@ -54,6 +55,7 @@ function toPublic(s: ServerSettings): PublicSettings {
   }
   return {
     sillyTavernMode: s.sillyTavernMode,
+    syntheticStreamShim: s.syntheticStreamShim,
     reverseProxyEnabled: s.reverseProxyEnabled,
     reverseProxyMode: s.reverseProxyMode,
     reverseProxyPool: s.reverseProxyPool.map((e) => ({ url: e.url, apiKeySet: !!e.apiKey })),
@@ -93,6 +95,7 @@ router.get("/api/settings", requireAuth, (_req, res) => {
 router.post("/api/settings", requireAuth, (req, res) => {
   const body = (req.body ?? {}) as {
     sillyTavernMode?: boolean;
+    syntheticStreamShim?: boolean;
     reverseProxyEnabled?: boolean;
     reverseProxyMode?: ReverseProxyMode;
     reverseProxyPool?: Array<{ url?: string; apiKey?: string | null }>;
@@ -108,6 +111,9 @@ router.post("/api/settings", requireAuth, (req, res) => {
 
   if (typeof body.sillyTavernMode === "boolean") {
     patch.sillyTavernMode = body.sillyTavernMode;
+  }
+  if (typeof body.syntheticStreamShim === "boolean") {
+    patch.syntheticStreamShim = body.syntheticStreamShim;
   }
   if (typeof body.reverseProxyEnabled === "boolean") {
     patch.reverseProxyEnabled = body.reverseProxyEnabled;

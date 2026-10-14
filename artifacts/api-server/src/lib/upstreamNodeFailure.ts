@@ -301,3 +301,25 @@ export function maybeDisableSelectedNode(args: {
     lastError: signal.message,
   });
 }
+
+/**
+ * A streaming response that ends without emitting a single chunk (not even a
+ * role delta) is the signature of an upstream relay giving up before the
+ * model produced its first byte: the request comes back as HTTP 200 with an
+ * empty placeholder body (observed as `text/plain` containing just a newline,
+ * or a whitespace-only body) after roughly 10 seconds of silence. The node
+ * relays it verbatim and the gateway forwards it as an empty stream, which
+ * reaches the client as a silent blank reply.
+ *
+ * Treat it like a transient node failure: apply the usual cooldown so the
+ * caller's retry loop picks a different pool entry instead of hammering the
+ * same node (which may be pointed at a slow upstream right now).
+ */
+export function handleEmptyUpstreamStream(endpoint: ProviderEndpoint): void {
+  if (endpoint.source !== "upstream" || !endpoint.nodeUrl) return;
+  logger.warn(
+    { nodeUrl: endpoint.nodeUrl },
+    "upstream stream produced no chunks — applying cooldown so the retry uses another node",
+  );
+  setNodeCooldown(endpoint.nodeUrl);
+}

@@ -45,6 +45,7 @@ export interface DisabledUpstreamNode {
 
 export interface Settings {
   sillyTavernMode: boolean;
+  syntheticStreamShim: boolean;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PublicPoolEntry[];
@@ -66,6 +67,7 @@ export interface PoolEntryPatch {
 
 export interface SettingsPatch {
   sillyTavernMode?: boolean;
+  syntheticStreamShim?: boolean;
   reverseProxyEnabled?: boolean;
   reverseProxyMode?: ReverseProxyMode;
   reverseProxyPool?: PoolEntryPatch[];

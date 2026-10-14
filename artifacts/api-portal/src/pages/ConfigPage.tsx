@@ -535,6 +535,17 @@ export default function ConfigPage() {
     }
   }
 
+  async function toggleSyntheticStreamShim() {
+    if (!settings) return;
+    setSaving(true);
+    try {
+      const updated = await updateSettings({ syntheticStreamShim: !settings.syntheticStreamShim });
+      setSettings(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="max-w-2xl space-y-6">
       <div>
@@ -1252,6 +1263,36 @@ export default function ConfigPage() {
             <span
               className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
                 settings?.sillyTavernMode ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Synthetic Stream Shim */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">流式参数增量下发</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              针对使用合成工具包装的请求(如 Antigravity Gateway 防截断网关):部分上游(OpenRouter 的 Google 模型)会把整个工具调用缓冲到结束时一次性返回。启用后,上游改问纯文本,逐段正文被实时还原为工具参数增量,客户端可边生成边显示;关闭则回退为原有整包行为。环境变量{" "}
+              <code className="bg-secondary/60 px-1 rounded">SYNTHETIC_STREAM_SHIM</code> 或请求头{" "}
+              <code className="bg-secondary/60 px-1 rounded">x-agw-stream-shim: on|off</code>{" "}
+              可强制覆盖本开关。
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={settings?.syntheticStreamShim ?? true}
+            disabled={saving || !settings}
+            onClick={toggleSyntheticStreamShim}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background disabled:opacity-50 ${
+              settings?.syntheticStreamShim ? "bg-primary" : "bg-secondary"
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                settings?.syntheticStreamShim ? "translate-x-5" : "translate-x-0"
               }`}
             />
           </button>
