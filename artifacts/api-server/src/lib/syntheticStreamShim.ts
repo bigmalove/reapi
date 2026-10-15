@@ -89,6 +89,27 @@ const ATE_TOOL_PREFIXES = [
 ] as const;
 const ATE_DEFAULT_CONTENT_KEY = "display_stream";
 
+/**
+ * Tool descriptions longer than this carry real client context (linux_1.3's
+ * ATE engine puts the full preset and history into the description) rather
+ * than a one-line instruction. Such descriptions are routed into a system
+ * message when the tool is stripped.
+ */
+const DESCRIPTION_CONTEXT_MIN_CHARS = 128;
+
+/**
+ * Messages up to this length that reference the transport tool are treated as
+ * output-mode control instructions and replaced wholesale. Longer messages
+ * (jailbreak prompts, format rules, archived context) only lose the sentences
+ * that mention the tool — never the whole message.
+ */
+const CONTROL_MESSAGE_MAX_CHARS = 400;
+
+const REDIRECT_SYSTEM =
+  "Respond directly with the final answer as plain text, ignoring any tool-call instructions. 直接以正文输出全部内容，严格遵守预设中的全部格式与写作要求，不要提及工具或参数。";
+const REDIRECT_USER =
+  "Please reply with the final answer directly as plain text. 请直接以正文输出全部内容，严格遵守预设中的全部格式与写作要求，不要提及工具或参数。";
+
 /** tool_choice values that still leave the tool set optional. */
 function isOptionalToolChoice(value: unknown): boolean {
   if (value === undefined || value === null) return true;
@@ -163,6 +184,34 @@ function extractContentKey(fn: Record<string, unknown>): string {
 }
 
 /**
+ * Remove only the sentences that reference the tool name, keeping every other
+ * sentence of the message intact. Long messages may carry real content
+ * (jailbreak text, format rules, context) that must survive the rewrite.
+ */
+function stripToolMentions(content: string, toolName: string): string {
+  const lines = content.split("\n");
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (!line.includes(toolName)) {
+      kept.push(line);
+      continue;
+    }
+    const sentences: string[] = [];
+    let buf = "";
+    for (const ch of line) {
+      buf += ch;
+      if ("。！？；!?;.".includes(ch)) {
+        sentences.push(buf);
+        buf = "";
+      }
+    }
+    if (buf.length > 0) sentences.push(buf);
+    kept.push(sentences.filter((s) => !s.includes(toolName)).join(""));
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
  * Detect a pure-text synthetic-tool streaming request and build the rewritten
  * upstream body. Returns null when the request is not such a request (then the
  * caller keeps the original body and transport unchanged).
@@ -205,25 +254,46 @@ export function planSyntheticStreamShim(
   delete clean["tool_choice"];
   delete clean["parallel_tool_calls"];
 
-  // Replace the injected control message(s) — they reference the (now removed)
-  // transport tool — with an equivalent "answer as text" instruction. Other
-  // messages are left untouched.
+  // Client engines put their control prompts in messages that reference the
+  // transport tool. Short control messages are replaced by an equivalent
+  // "answer as text" instruction; long messages only lose the sentences that
+  // mention the tool — replacing a whole long message could destroy real
+  // context or prompt text (regression fixed 2026-10-15).
   const rawMessages = clean["messages"];
   if (Array.isArray(rawMessages)) {
     const messages = [...rawMessages];
     for (let i = 0; i < messages.length; i++) {
       const msg = asRecord(messages[i]);
       if (!msg || typeof msg["content"] !== "string") continue;
-      if (!msg["content"].includes(toolName)) continue;
+      const content = msg["content"];
+      if (!content.includes(toolName)) continue;
       const role = typeof msg["role"] === "string" ? msg["role"] : "";
-      messages[i] = {
-        ...msg,
-        content:
-          role === "system" || role === "developer"
-            ? "Respond to the user directly with the final answer as plain text."
-            : "Please reply with your final answer directly as plain text.",
-      };
+      const redirect =
+        role === "system" || role === "developer" ? REDIRECT_SYSTEM : REDIRECT_USER;
+      if (content.length <= CONTROL_MESSAGE_MAX_CHARS) {
+        messages[i] = { ...msg, content: redirect };
+        continue;
+      }
+      const stripped = stripToolMentions(content, toolName);
+      messages[i] = { ...msg, content: stripped.length > 0 ? stripped : redirect };
     }
+    clean["messages"] = messages;
+  }
+
+  // Client engines may transport the full preset and history inside the tool
+  // DESCRIPTION (linux_1.3's ATE engine does: `fullPresetAndHistory` lands in
+  // the description while the messages become a harmless tail). Dropping the
+  // tool would silently drop the whole context — route substantial
+  // descriptions into a system message instead.
+  const descRaw = typeof fn["description"] === "string" ? fn["description"].trim() : "";
+  if (
+    (isClientTransportTool || isAteTool) &&
+    descRaw.length >= DESCRIPTION_CONTEXT_MIN_CHARS
+  ) {
+    const messages = Array.isArray(clean["messages"])
+      ? [...(clean["messages"] as unknown[])]
+      : [];
+    messages.unshift({ role: "system", content: descRaw });
     clean["messages"] = messages;
   }
 
