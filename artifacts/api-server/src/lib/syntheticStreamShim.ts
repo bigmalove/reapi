@@ -48,6 +48,25 @@ import { getSettings } from "./settings.js";
 export const SYNTHETIC_TOOL_DESCRIPTION =
   "Use this transport tool exactly once for the final user-visible answer. Put the complete answer in content. Never wrap genuine tool calls in it.";
 
+/**
+ * Client-side transport tools. Presets running inside the client (e.g. the
+ * SillyTavern "防截断" wrapper) inject their own single tool and ask the model
+ * to write the whole answer into its `content` argument. Google models on
+ * OpenRouter buffer those arguments to the very end of the generation exactly
+ * like the gateway tool above, so the same request rewrite applies — the only
+ * difference is on the response side: the client consumes the answer as plain
+ * message text, so it wants the (now incremental) text stream untouched
+ * instead of a re-encoded tool-call stream.
+ */
+const CLIENT_TRANSPORT_TOOL_NAME = "game_content";
+const CLIENT_TRANSPORT_TOOL_HINT = "你的全部输出应当在此工具内";
+
+/** tool_choice values that still leave the tool set optional. */
+function isOptionalToolChoice(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return typeof value === "string" && (value === "auto" || value === "none");
+}
+
 const OPEN_ARGS = '{"content":"';
 const CLOSE_ARGS = '"}';
 const REASONING_KEYS = ["reasoning_content", "reasoning"] as const;
@@ -83,6 +102,13 @@ export interface SyntheticStreamPlan {
   toolName: string;
   /** Request body for upstream: synthetic tool removed, answer asked as text. */
   body: Record<string, unknown>;
+  /**
+   * Whether the upstream response must be re-encoded back into tool_call
+   * argument deltas. The AGW wrapper needs its tool-call shape back; a
+   * client-side transport preset (SillyTavern) wants the plain streamed text
+   * untouched instead — re-encoding would only add buffering for it.
+   */
+  reencode: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -110,7 +136,18 @@ export function planSyntheticStreamShim(
   const fn = tool ? asRecord(tool["function"]) : null;
   if (!tool || tool["type"] !== "function" || !fn) return null;
   if (typeof fn["name"] !== "string" || fn["name"].length === 0) return null;
-  if (fn["description"] !== SYNTHETIC_TOOL_DESCRIPTION) return null;
+
+  const isGatewayTool = fn["description"] === SYNTHETIC_TOOL_DESCRIPTION;
+  const isClientTransportTool =
+    fn["name"] === CLIENT_TRANSPORT_TOOL_NAME &&
+    typeof fn["description"] === "string" &&
+    fn["description"].includes(CLIENT_TRANSPORT_TOOL_HINT);
+  if (!isGatewayTool && !isClientTransportTool) return null;
+
+  // The client tool is only shimmed when the caller leaves the choice to the
+  // model; a forced tool_choice demands this exact call and wins over the
+  // rewrite. (The gateway tool has always been shimmed unconditionally.)
+  if (isClientTransportTool && !isOptionalToolChoice(body["tool_choice"])) return null;
 
   const toolName = fn["name"];
 
@@ -141,7 +178,7 @@ export function planSyntheticStreamShim(
     clean["messages"] = messages;
   }
 
-  return { toolName, body: clean };
+  return { toolName, body: clean, reencode: isGatewayTool };
 }
 
 /**
