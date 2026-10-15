@@ -318,21 +318,12 @@ export async function callOpenRouter(
 
   if (request.stream) {
     const stream = parseSSEStream(response);
-    if (shim?.reencode) {
+    if (shim) {
       logger.info(
         { model: actualModel, tool: shim.toolName },
         "synthetic stream shim active: re-encoding content into incremental tool_call arguments",
       );
-      return ensureNonEmptyStream(
-        wrapSyntheticToolStream(stream, shim.toolName, shim.contentKey),
-        endpoint,
-      );
-    }
-    if (shim) {
-      logger.info(
-        { model: actualModel, tool: shim.toolName },
-        "client transport tool shim active: streaming plain text instead of buffered tool arguments",
-      );
+      return ensureNonEmptyStream(wrapSyntheticToolStream(stream, shim.toolName), endpoint);
     }
     return ensureNonEmptyStream(stream, endpoint);
   }

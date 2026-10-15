@@ -36,19 +36,6 @@ import type { StreamChunk } from "../types.js";
  *    truncation signal and can repair/retry as configured;
  *  - reasoning/role deltas pass through untouched.
  *
- * Recognised request classes (all: single-tool, streaming):
- *  1. AGW transport tool (`SYNTHETIC_TOOL_DESCRIPTION` anchor) — re-encoded as
- *     described above;
- *  2. plain-text client transport tools (SillyTavern `game_content`) — the
- *     client consumes plain message text, so the tool is stripped and the
- *     genuine streamed text is forwarded untouched (`reencode: false`);
- *  3. argument-decoding client engines (`linux_1.3` / "ate" family: names
- *     built from `ATE_TOOL_PREFIXES`, answer argument `display_stream`).
- *     Their in-page decoder buffers plain assistant text until the stream end
- *     and only emits tool-argument fragments live — so like class 1 they need
- *     the streamed text re-encoded into incremental argument deltas under the
- *     client's own tool name and argument key.
- *
  * Control (most specific wins):
  *  1. per-request header `x-agw-stream-shim: on|off` — A/B tests, client control
  *  2. environment `SYNTHETIC_STREAM_SHIM=on|off` — deployment-level override
@@ -61,62 +48,7 @@ import { getSettings } from "./settings.js";
 export const SYNTHETIC_TOOL_DESCRIPTION =
   "Use this transport tool exactly once for the final user-visible answer. Put the complete answer in content. Never wrap genuine tool calls in it.";
 
-/**
- * Client-side transport tools. Presets running inside the client (e.g. the
- * SillyTavern "防截断" wrapper) inject their own single tool and ask the model
- * to write the whole answer into its `content` argument. Google models on
- * OpenRouter buffer those arguments to the very end of the generation exactly
- * like the gateway tool above, so the same request rewrite applies — the only
- * difference is on the response side: the client consumes the answer as plain
- * message text, so it wants the (now incremental) text stream untouched
- * instead of a re-encoded tool-call stream.
- */
-const CLIENT_TRANSPORT_TOOL_NAME = "game_content";
-const CLIENT_TRANSPORT_TOOL_HINT = "你的全部输出应当在此工具内";
-
-/**
- * Client-side argument-decoding engines (`linux_1.3` / "ate" family): the
- * tool name is one of these fixed prefixes plus a random suffix. The engine's
- * in-page decoder turns incremental `arguments` fragments back into live
- * content but buffers plain text until the stream end, so these requests take
- * the re-encode path (class 3 in the module docs).
- */
-const ATE_TOOL_PREFIXES = [
-  "render_document_chunk_",
-  "dispatch_stream_payload_",
-  "stream_response_segment_",
-  "deliver_formatted_view_",
-] as const;
-const ATE_DEFAULT_CONTENT_KEY = "display_stream";
-
-/**
- * Tool descriptions longer than this carry real client context (linux_1.3's
- * ATE engine puts the full preset and history into the description) rather
- * than a one-line instruction. Such descriptions are routed into a system
- * message when the tool is stripped.
- */
-const DESCRIPTION_CONTEXT_MIN_CHARS = 128;
-
-/**
- * Messages up to this length that reference the transport tool are treated as
- * output-mode control instructions and replaced wholesale. Longer messages
- * (jailbreak prompts, format rules, archived context) only lose the sentences
- * that mention the tool — never the whole message.
- */
-const CONTROL_MESSAGE_MAX_CHARS = 400;
-
-const REDIRECT_SYSTEM =
-  "Respond directly with the final answer as plain text, ignoring any tool-call instructions. 直接以正文输出全部内容，严格遵守预设中的全部格式与写作要求，不要提及工具或参数。";
-const REDIRECT_USER =
-  "Please reply with the final answer directly as plain text. 请直接以正文输出全部内容，严格遵守预设中的全部格式与写作要求，不要提及工具或参数。";
-
-/** tool_choice values that still leave the tool set optional. */
-function isOptionalToolChoice(value: unknown): boolean {
-  if (value === undefined || value === null) return true;
-  return typeof value === "string" && (value === "auto" || value === "none");
-}
-
-/* The opening envelope is built per request from the plan's `contentKey`. */
+const OPEN_ARGS = '{"content":"';
 const CLOSE_ARGS = '"}';
 const REASONING_KEYS = ["reasoning_content", "reasoning"] as const;
 
@@ -151,64 +83,12 @@ export interface SyntheticStreamPlan {
   toolName: string;
   /** Request body for upstream: synthetic tool removed, answer asked as text. */
   body: Record<string, unknown>;
-  /**
-   * Whether the upstream response must be re-encoded back into tool_call
-   * argument deltas. The AGW wrapper needs its tool-call shape back; a
-   * client-side transport preset (SillyTavern) wants the plain streamed text
-   * untouched instead — re-encoding would only add buffering for it.
-   */
-  reencode: boolean;
-  /** Argument key of the re-encoded JSON envelope (`content`, `display_stream`, …). */
-  contentKey: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-/** linux_1.3-style engine tool names: fixed prefix + random suffix. */
-function isAteToolName(name: string): boolean {
-  return ATE_TOOL_PREFIXES.some(
-    (prefix) => name.startsWith(prefix) && name.length > prefix.length,
-  );
-}
-
-/** First declared property of the tool schema — the answer argument key. */
-function extractContentKey(fn: Record<string, unknown>): string {
-  const parameters = asRecord(fn["parameters"]);
-  const properties = parameters ? asRecord(parameters["properties"]) : null;
-  const first = properties ? Object.keys(properties)[0] : undefined;
-  return first && first.length > 0 ? first : ATE_DEFAULT_CONTENT_KEY;
-}
-
-/**
- * Remove only the sentences that reference the tool name, keeping every other
- * sentence of the message intact. Long messages may carry real content
- * (jailbreak text, format rules, context) that must survive the rewrite.
- */
-function stripToolMentions(content: string, toolName: string): string {
-  const lines = content.split("\n");
-  const kept: string[] = [];
-  for (const line of lines) {
-    if (!line.includes(toolName)) {
-      kept.push(line);
-      continue;
-    }
-    const sentences: string[] = [];
-    let buf = "";
-    for (const ch of line) {
-      buf += ch;
-      if ("。！？；!?;.".includes(ch)) {
-        sentences.push(buf);
-        buf = "";
-      }
-    }
-    if (buf.length > 0) sentences.push(buf);
-    kept.push(sentences.filter((s) => !s.includes(toolName)).join(""));
-  }
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**
@@ -230,74 +110,38 @@ export function planSyntheticStreamShim(
   const fn = tool ? asRecord(tool["function"]) : null;
   if (!tool || tool["type"] !== "function" || !fn) return null;
   if (typeof fn["name"] !== "string" || fn["name"].length === 0) return null;
-
-  const isGatewayTool = fn["description"] === SYNTHETIC_TOOL_DESCRIPTION;
-  const isClientTransportTool =
-    fn["name"] === CLIENT_TRANSPORT_TOOL_NAME &&
-    typeof fn["description"] === "string" &&
-    fn["description"].includes(CLIENT_TRANSPORT_TOOL_HINT);
-  const isAteTool = isAteToolName(fn["name"]);
-  if (!isGatewayTool && !isClientTransportTool && !isAteTool) return null;
-
-  // Client-side tools are only shimmed when the caller leaves the choice to
-  // the model; a forced tool_choice demands this exact call and wins over the
-  // rewrite. (The gateway tool has always been shimmed unconditionally.)
-  if ((isClientTransportTool || isAteTool) && !isOptionalToolChoice(body["tool_choice"])) {
-    return null;
-  }
+  if (fn["description"] !== SYNTHETIC_TOOL_DESCRIPTION) return null;
 
   const toolName = fn["name"];
-  const contentKey = isAteTool ? extractContentKey(fn) : "content";
 
   const clean: Record<string, unknown> = { ...body };
   delete clean["tools"];
   delete clean["tool_choice"];
   delete clean["parallel_tool_calls"];
 
-  // Client engines put their control prompts in messages that reference the
-  // transport tool. Short control messages are replaced by an equivalent
-  // "answer as text" instruction; long messages only lose the sentences that
-  // mention the tool — replacing a whole long message could destroy real
-  // context or prompt text (regression fixed 2026-10-15).
+  // Replace the injected control message(s) — they reference the (now removed)
+  // transport tool — with an equivalent "answer as text" instruction. Other
+  // messages are left untouched.
   const rawMessages = clean["messages"];
   if (Array.isArray(rawMessages)) {
     const messages = [...rawMessages];
     for (let i = 0; i < messages.length; i++) {
       const msg = asRecord(messages[i]);
       if (!msg || typeof msg["content"] !== "string") continue;
-      const content = msg["content"];
-      if (!content.includes(toolName)) continue;
+      if (!msg["content"].includes(toolName)) continue;
       const role = typeof msg["role"] === "string" ? msg["role"] : "";
-      const redirect =
-        role === "system" || role === "developer" ? REDIRECT_SYSTEM : REDIRECT_USER;
-      if (content.length <= CONTROL_MESSAGE_MAX_CHARS) {
-        messages[i] = { ...msg, content: redirect };
-        continue;
-      }
-      const stripped = stripToolMentions(content, toolName);
-      messages[i] = { ...msg, content: stripped.length > 0 ? stripped : redirect };
+      messages[i] = {
+        ...msg,
+        content:
+          role === "system" || role === "developer"
+            ? "Respond to the user directly with the final answer as plain text."
+            : "Please reply with your final answer directly as plain text.",
+      };
     }
     clean["messages"] = messages;
   }
 
-  // Client engines may transport the full preset and history inside the tool
-  // DESCRIPTION (linux_1.3's ATE engine does: `fullPresetAndHistory` lands in
-  // the description while the messages become a harmless tail). Dropping the
-  // tool would silently drop the whole context — route substantial
-  // descriptions into a system message instead.
-  const descRaw = typeof fn["description"] === "string" ? fn["description"].trim() : "";
-  if (
-    (isClientTransportTool || isAteTool) &&
-    descRaw.length >= DESCRIPTION_CONTEXT_MIN_CHARS
-  ) {
-    const messages = Array.isArray(clean["messages"])
-      ? [...(clean["messages"] as unknown[])]
-      : [];
-    messages.unshift({ role: "system", content: descRaw });
-    clean["messages"] = messages;
-  }
-
-  return { toolName, body: clean, reencode: isGatewayTool || isAteTool, contentKey };
+  return { toolName, body: clean };
 }
 
 /**
@@ -343,16 +187,13 @@ function makeToolChunk(
 
 /**
  * Wrap the upstream content stream and re-encode it into incremental
- * synthetic-tool argument deltas under `contentKey`. See module docs for the
- * exact semantics.
+ * synthetic-tool argument deltas. See module docs for the exact semantics.
  */
 export async function* wrapSyntheticToolStream(
   upstream: AsyncIterable<StreamChunk>,
   toolName: string,
-  contentKey: string = "content",
 ): AsyncIterable<StreamChunk> {
   const callId = `call_agw_${randomBytes(6).toString("hex")}`;
-  const openArgs = `{"${escapeFragment(contentKey)}":"`;
   let started = false;
   let closed = false;
 
@@ -394,7 +235,7 @@ export async function* wrapSyntheticToolStream(
       const fragment = escapeFragment(content);
       if (!started) {
         started = true;
-        yield makeToolChunk(chunk, openArgs + fragment, true, callId, toolName);
+        yield makeToolChunk(chunk, OPEN_ARGS + fragment, true, callId, toolName);
       } else {
         yield makeToolChunk(chunk, fragment, false, callId, toolName);
       }
