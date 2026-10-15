@@ -286,6 +286,14 @@ export async function callOpenRouter(
   const outboundHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${apiKey}`,
+    // Pool nodes choose between their SSE path and the non-streaming
+    // keep-alive heartbeat path based on this header. A streaming request
+    // forwarded without `text/event-stream` takes the heartbeat path: the
+    // node flushes a bare 200 + "\n" at its 10s grace deadline and the real
+    // stream never reaches us (the client sees an empty reply). Announce SSE
+    // whenever we intend to stream; non-streaming requests keep the
+    // heartbeat path that exists to survive the 300s idle proxy timeout.
+    ...(request.stream ? { Accept: "text/event-stream" } : {}),
     "HTTP-Referer": "https://replit.com",
     "X-Title": "AI Gateway",
     // Forward Anthropic / OpenAI beta headers when the caller asks for them —

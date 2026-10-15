@@ -231,6 +231,12 @@ export async function callGemini(
   if (clientHeaders["x-goog-api-client"]) {
     headers["x-goog-api-client"] = clientHeaders["x-goog-api-client"];
   }
+  // Pool nodes gate their SSE path on this header; without it a streaming
+  // request takes the node's keep-alive heartbeat path and the stream is
+  // replaced by an empty placeholder. See providers/openrouter.ts.
+  if (request.stream) {
+    headers["Accept"] = "text/event-stream";
+  }
 
   // Pass-through view of additional fields the base type doesn't enumerate.
   const extra = request as ChatCompletionRequest & {

@@ -88,6 +88,10 @@ export async function callOpenAI(
   const outboundHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${apiKey}`,
+    // Pool nodes gate their SSE path on this header; without it a streaming
+    // request takes the node's keep-alive heartbeat path and the stream is
+    // replaced by an empty placeholder. See providers/openrouter.ts.
+    ...(request.stream ? { Accept: "text/event-stream" } : {}),
     ...(clientHeaders["openai-beta"] ? { "OpenAI-Beta": clientHeaders["openai-beta"] } : {}),
     ...(clientHeaders["openai-organization"]
       ? { "OpenAI-Organization": clientHeaders["openai-organization"] }

@@ -404,6 +404,10 @@ export async function callAnthropic(
     "Content-Type": "application/json",
     "x-api-key": apiKey,
     "anthropic-version": clientHeaders["anthropic-version"] ?? "2023-06-01",
+    // Pool nodes gate their SSE path on this header; without it a streaming
+    // request takes the node's keep-alive heartbeat path and the stream is
+    // replaced by an empty placeholder. See providers/openrouter.ts.
+    ...(request.stream ? { Accept: "text/event-stream" } : {}),
     ...(clientHeaders["anthropic-beta"]
       ? { "anthropic-beta": clientHeaders["anthropic-beta"] }
       : {}),
