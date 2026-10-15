@@ -323,7 +323,10 @@ export async function callOpenRouter(
         { model: actualModel, tool: shim.toolName },
         "synthetic stream shim active: re-encoding content into incremental tool_call arguments",
       );
-      return ensureNonEmptyStream(wrapSyntheticToolStream(stream, shim.toolName), endpoint);
+      return ensureNonEmptyStream(
+        wrapSyntheticToolStream(stream, shim.toolName, shim.contentKey),
+        endpoint,
+      );
     }
     if (shim) {
       logger.info(

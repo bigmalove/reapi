@@ -36,6 +36,19 @@ import type { StreamChunk } from "../types.js";
  *    truncation signal and can repair/retry as configured;
  *  - reasoning/role deltas pass through untouched.
  *
+ * Recognised request classes (all: single-tool, streaming):
+ *  1. AGW transport tool (`SYNTHETIC_TOOL_DESCRIPTION` anchor) — re-encoded as
+ *     described above;
+ *  2. plain-text client transport tools (SillyTavern `game_content`) — the
+ *     client consumes plain message text, so the tool is stripped and the
+ *     genuine streamed text is forwarded untouched (`reencode: false`);
+ *  3. argument-decoding client engines (`linux_1.3` / "ate" family: names
+ *     built from `ATE_TOOL_PREFIXES`, answer argument `display_stream`).
+ *     Their in-page decoder buffers plain assistant text until the stream end
+ *     and only emits tool-argument fragments live — so like class 1 they need
+ *     the streamed text re-encoded into incremental argument deltas under the
+ *     client's own tool name and argument key.
+ *
  * Control (most specific wins):
  *  1. per-request header `x-agw-stream-shim: on|off` — A/B tests, client control
  *  2. environment `SYNTHETIC_STREAM_SHIM=on|off` — deployment-level override
@@ -61,13 +74,28 @@ export const SYNTHETIC_TOOL_DESCRIPTION =
 const CLIENT_TRANSPORT_TOOL_NAME = "game_content";
 const CLIENT_TRANSPORT_TOOL_HINT = "你的全部输出应当在此工具内";
 
+/**
+ * Client-side argument-decoding engines (`linux_1.3` / "ate" family): the
+ * tool name is one of these fixed prefixes plus a random suffix. The engine's
+ * in-page decoder turns incremental `arguments` fragments back into live
+ * content but buffers plain text until the stream end, so these requests take
+ * the re-encode path (class 3 in the module docs).
+ */
+const ATE_TOOL_PREFIXES = [
+  "render_document_chunk_",
+  "dispatch_stream_payload_",
+  "stream_response_segment_",
+  "deliver_formatted_view_",
+] as const;
+const ATE_DEFAULT_CONTENT_KEY = "display_stream";
+
 /** tool_choice values that still leave the tool set optional. */
 function isOptionalToolChoice(value: unknown): boolean {
   if (value === undefined || value === null) return true;
   return typeof value === "string" && (value === "auto" || value === "none");
 }
 
-const OPEN_ARGS = '{"content":"';
+/* The opening envelope is built per request from the plan's `contentKey`. */
 const CLOSE_ARGS = '"}';
 const REASONING_KEYS = ["reasoning_content", "reasoning"] as const;
 
@@ -109,12 +137,29 @@ export interface SyntheticStreamPlan {
    * untouched instead — re-encoding would only add buffering for it.
    */
   reencode: boolean;
+  /** Argument key of the re-encoded JSON envelope (`content`, `display_stream`, …). */
+  contentKey: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/** linux_1.3-style engine tool names: fixed prefix + random suffix. */
+function isAteToolName(name: string): boolean {
+  return ATE_TOOL_PREFIXES.some(
+    (prefix) => name.startsWith(prefix) && name.length > prefix.length,
+  );
+}
+
+/** First declared property of the tool schema — the answer argument key. */
+function extractContentKey(fn: Record<string, unknown>): string {
+  const parameters = asRecord(fn["parameters"]);
+  const properties = parameters ? asRecord(parameters["properties"]) : null;
+  const first = properties ? Object.keys(properties)[0] : undefined;
+  return first && first.length > 0 ? first : ATE_DEFAULT_CONTENT_KEY;
 }
 
 /**
@@ -142,14 +187,18 @@ export function planSyntheticStreamShim(
     fn["name"] === CLIENT_TRANSPORT_TOOL_NAME &&
     typeof fn["description"] === "string" &&
     fn["description"].includes(CLIENT_TRANSPORT_TOOL_HINT);
-  if (!isGatewayTool && !isClientTransportTool) return null;
+  const isAteTool = isAteToolName(fn["name"]);
+  if (!isGatewayTool && !isClientTransportTool && !isAteTool) return null;
 
-  // The client tool is only shimmed when the caller leaves the choice to the
-  // model; a forced tool_choice demands this exact call and wins over the
+  // Client-side tools are only shimmed when the caller leaves the choice to
+  // the model; a forced tool_choice demands this exact call and wins over the
   // rewrite. (The gateway tool has always been shimmed unconditionally.)
-  if (isClientTransportTool && !isOptionalToolChoice(body["tool_choice"])) return null;
+  if ((isClientTransportTool || isAteTool) && !isOptionalToolChoice(body["tool_choice"])) {
+    return null;
+  }
 
   const toolName = fn["name"];
+  const contentKey = isAteTool ? extractContentKey(fn) : "content";
 
   const clean: Record<string, unknown> = { ...body };
   delete clean["tools"];
@@ -178,7 +227,7 @@ export function planSyntheticStreamShim(
     clean["messages"] = messages;
   }
 
-  return { toolName, body: clean, reencode: isGatewayTool };
+  return { toolName, body: clean, reencode: isGatewayTool || isAteTool, contentKey };
 }
 
 /**
@@ -224,13 +273,16 @@ function makeToolChunk(
 
 /**
  * Wrap the upstream content stream and re-encode it into incremental
- * synthetic-tool argument deltas. See module docs for the exact semantics.
+ * synthetic-tool argument deltas under `contentKey`. See module docs for the
+ * exact semantics.
  */
 export async function* wrapSyntheticToolStream(
   upstream: AsyncIterable<StreamChunk>,
   toolName: string,
+  contentKey: string = "content",
 ): AsyncIterable<StreamChunk> {
   const callId = `call_agw_${randomBytes(6).toString("hex")}`;
+  const openArgs = `{"${escapeFragment(contentKey)}":"`;
   let started = false;
   let closed = false;
 
@@ -272,7 +324,7 @@ export async function* wrapSyntheticToolStream(
       const fragment = escapeFragment(content);
       if (!started) {
         started = true;
-        yield makeToolChunk(chunk, OPEN_ARGS + fragment, true, callId, toolName);
+        yield makeToolChunk(chunk, openArgs + fragment, true, callId, toolName);
       } else {
         yield makeToolChunk(chunk, fragment, false, callId, toolName);
       }
