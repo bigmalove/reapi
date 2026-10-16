@@ -28,11 +28,13 @@ const BUDGET_EXCEEDED_PATTERNS: RegExp[] = [
 /**
  * Detect a Replit page served in place of a node whose process is not running:
  *  - the hosting placeholder ("This app isn't live yet") for a stopped or
- *    undeployed `.replit.app` deployment, and
+ *    undeployed `.replit.app` deployment,
  *  - the "Run this app to see the results here." page for a `.replit.dev`
- *    workspace that is not running.
- * Both arrive as 404s that would otherwise look like an app without the route.
- * Returns a human-readable error, or null.
+ *    workspace that is not running, and
+ *  - the platform's generic 404 page for a Repl that no longer exists
+ *    (deleted or renamed).
+ * All three arrive as 404s that would otherwise look like an app without the
+ * route. Returns a human-readable error, or null.
  */
 export function detectReplitNotRunning(body: string): string | null {
   if (body.includes("replit.com/site/hosting")) {
@@ -40,6 +42,20 @@ export function detectReplitNotRunning(body: string): string | null {
   }
   if (body.includes("Run this app to see the results here")) {
     return "Replit dev workspace is not running (\"Run this app\" page returned)";
+  }
+  // A deleted or renamed Repl: Replit's edge never reaches an app at all, so it
+  // answers with its own generic 404 page. Unlike the two placeholders above,
+  // nothing on it marks the app as absent — it reads as a live app that merely
+  // lacks the route, so the node is never cooled down or removed and in sticky
+  // mode (pool[0] until a cooldown moves it) every request keeps going to it.
+  // The platform page's heading is what tells it apart from the node app's own
+  // Express 404, which renders `<pre>Cannot GET /path</pre>` instead.
+  if (
+    body.includes("Error: Page not found") &&
+    !body.includes("Cannot GET") &&
+    !body.includes("Cannot POST")
+  ) {
+    return "Replit Repl no longer exists (generic 404 page returned)";
   }
   return null;
 }
