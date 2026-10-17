@@ -1037,14 +1037,6 @@ export default function ConfigPage() {
               detail: true,
             },
             {
-              key: "forbidden-unverified",
-              short: "403 无正文已冷却",
-              label: "403 无正文 · 已冷却（证据不足，未屏蔽）",
-              tone: "text-amber-400",
-              hint: "两次探测都是 403 但响应体为空。可识别的拒绝一定带 JSON 正文，空体更像边缘或实例重启中的临时回绝，所以只降队尾冷却 60 秒，不把这个节点拉黑。",
-              detail: true,
-            },
-            {
               key: "unreachable",
               short: "无响应",
               label: "无响应 · 未处理",
@@ -1057,7 +1049,7 @@ export default function ConfigPage() {
               short: "其他",
               label: "其他错误 · 未处理",
               tone: "text-muted-foreground",
-              hint: "",
+              hint: "403 但两次都拿不到响应正文时也落在这里：没有正文就不下结论，只降到队尾冷却 60 秒，节点仍在池里，下一次真实请求再判。",
               detail: true,
             },
           ];

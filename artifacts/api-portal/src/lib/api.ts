@@ -365,19 +365,10 @@ export interface NodeCheckResult {
    * - server-error-with-body 500 but the request reached upstream (transient), cooled down
    * - quota                  403 FREE_TIER_BUDGET_EXCEEDED — monthly quota, republishing cannot help
    * - forbidden              any other 403 that carries a body — access refused, no recovery window
-   * - forbidden-unverified   403 with no body twice — no verdict, cooled down only
    * - unreachable            no HTTP response at all (DNS / timeout / refused)
-   * - error                  anything else
+   * - error                  anything else, including a 403 that never yields a body
    */
-  kind?:
-    | "ok"
-    | "credential"
-    | "server-error-with-body"
-    | "quota"
-    | "forbidden"
-    | "forbidden-unverified"
-    | "unreachable"
-    | "error";
+  kind?: "ok" | "credential" | "server-error-with-body" | "quota" | "forbidden" | "unreachable" | "error";
 }
 
 export interface NodeAiCheckResult {
@@ -391,7 +382,6 @@ export interface NodeAiCheckResult {
     cooled: number;
     quota: number;
     forbidden: number;
-    forbiddenUnverified: number;
     unreachable: number;
     error: number;
   };

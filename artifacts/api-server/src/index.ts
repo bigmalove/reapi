@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { initSettings } from "./lib/settings";
 import { initModels } from "./lib/models";
+import { recheckQuestionableDisabledNodes } from "./lib/disabledNodeRecheck";
 
 const rawPort = process.env["PORT"];
 
@@ -36,6 +37,14 @@ async function main() {
 
   server.setTimeout(600_000);
   server.keepAliveTimeout = 600_000;
+
+  // Fire-and-forget: fix entries that were blocked on an unreadable answer so
+  // the panel shows what the node actually is (usually "免费额度耗尽" with its
+  // monthly window, not a permanent "forbidden"). Deliberately not awaited —
+  // a slow node must never hold up the port.
+  void recheckQuestionableDisabledNodes().catch((err) => {
+    logger.warn({ err }, "re-probe of questionable disabled nodes failed");
+  });
 }
 
 main().catch((err) => {

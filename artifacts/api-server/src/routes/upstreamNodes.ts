@@ -343,11 +343,16 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
 // instance restarts or while it is being republished. Observed for real: a node
 // was disabled permanently as `forbidden` on an empty 403, and by the time it
 // was looked at again it answered 403 with a full FREE_TIER_BUDGET_EXCEEDED
-// body — the right verdict was "quota, 31 days", not "forbidden, forever". It
-// is also a dead end: `check-disabled` only restores nodes that answer 200, so
-// nothing was ever going to undo the mistake. Ambiguous 403s are now retried
-// once and then merely cooled down, which costs one round trip and leaves the
-// node in the pool for the next request to judge.
+// body — the right verdict was "quota, 31 days", not "forbidden, forever".
+// It is also a dead end: `check-disabled` only restores nodes that answer 200,
+// so nothing was ever going to undo the mistake.
+//
+// Such an ambiguous 403 is now re-probed once. If the retry carries a body the
+// verdict follows that body — which is how a quota node ends up on the
+// `quota` row and shows "免费额度耗尽" like every other one. If it is still
+// empty, the node is only cooled down: no new class, no eviction, nothing the
+// operator has to read about. A new bucket for "403 with no body" was tried and
+// removed — it described our uncertainty rather than the node's state.
 router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
   const settings = getSettings();
   const pool = settings.reverseProxyPool;
@@ -384,12 +389,13 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
     const budget = detectBudgetExceeded(body);
 
     // Classify so the portal can explain every node instead of hiding the
-    // remainder behind an "other" count.
+    // remainder behind an "other" count. Note there is deliberately no bucket
+    // for "403 with no body": an unreadable refusal stays in `error` (cooled
+    // below) rather than getting a category of its own.
     let kind: string;
     if (online) kind = "ok";
     else if (budget) kind = "quota";
     else if (status === 403 && body) kind = "forbidden";
-    else if (status === 403) kind = "forbidden-unverified";
     else if (status === 500 && body) kind = "server-error-with-body";
     else if (status === 500) kind = "credential";
     else if (status === undefined) kind = "unreachable";
@@ -449,19 +455,21 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
         lastError,
       });
       disabled.push(r.url);
-    } else if (kind === "forbidden-unverified") {
-      // Two probes, both 403 with no body — no verdict, so no eviction.
-      logger.warn(
-        { nodeUrl: r.url, upstreamStatus: status },
-        "upstream node returned 403 with no body in AI check — cooling down without blocking",
-      );
-      setNodeCooldown(r.url);
-      rotateNodeToEnd(r.url);
-      cooled.push(r.url);
     } else if (kind === "server-error-with-body") {
       logger.warn(
         { nodeUrl: r.url, upstreamStatus: r.status, body: body.slice(0, 200) },
         "upstream node returned 500 with a body in AI check — cooling down",
+      );
+      setNodeCooldown(r.url);
+      rotateNodeToEnd(r.url);
+      cooled.push(r.url);
+    } else if (status === 403) {
+      // Unreadable 403 (empty body twice): rotate away from it without drawing
+      // a conclusion. It keeps its place in the pool — the next real request
+      // gets a body it can judge.
+      logger.warn(
+        { nodeUrl: r.url, upstreamStatus: status },
+        "upstream node returned 403 with no body in AI check — cooling down without blocking",
       );
       setNodeCooldown(r.url);
       rotateNodeToEnd(r.url);
@@ -476,7 +484,6 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
     cooled: cooled.length,
     quota: annotated.filter((r) => r.kind === "quota").length,
     forbidden: annotated.filter((r) => r.kind === "forbidden").length,
-    forbiddenUnverified: annotated.filter((r) => r.kind === "forbidden-unverified").length,
     unreachable: annotated.filter((r) => r.kind === "unreachable").length,
     error: annotated.filter((r) => r.kind === "error").length,
   };
