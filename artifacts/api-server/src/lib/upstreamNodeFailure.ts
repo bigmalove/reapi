@@ -283,7 +283,25 @@ export function maybeDisableSelectedNode(args: {
   }
 
   const signal = parseNodeSignal(responseStatus, responseBody);
-  if (!signal) return;
+  if (!signal) {
+    // A 5xx carrying no recognisable signal means the node's own relay failed
+    // before it could answer — observed as HTTP 500 with a completely empty
+    // body when the node's Replit AI Integration is unhealthy. The condition is
+    // persistent per node (4/4 on repeat) and can affect the majority of a live
+    // pool, while a pool's head is whatever was configured last — so without
+    // this branch nothing is recorded and sticky mode keeps hammering pool[0].
+    // Treat it as a transient node fault: cool it down and move it to the tail,
+    // which is what actually hands the caller's retry a different node.
+    if (responseStatus >= 500) {
+      logger.warn(
+        { nodeUrl: endpoint.nodeUrl, upstreamStatus: responseStatus, bodyLength: responseBody.length },
+        "upstream node returned 5xx with no node signal — applying cooldown and moving to end of pool",
+      );
+      setNodeCooldown(endpoint.nodeUrl);
+      rotateNodeToEnd(endpoint.nodeUrl);
+    }
+    return;
+  }
 
   // Wrapped 429: the gateway returned 502 but the root cause is upstream rate-limiting.
   // Apply cooldown rather than permanently removing the node.

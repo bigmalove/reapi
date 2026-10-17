@@ -11,6 +11,21 @@ import type { ChatCompletionRequest, StreamChunk } from "../../types.js";
 
 const MAX_ATTEMPTS = 3;
 
+// A node-level 5xx (`<Provider> error 5xx: ...`) means "this node cannot serve
+// right now", not "this request is wrong". The pool is heterogeneous — a large
+// share of nodes answer 500 while their neighbours are healthy — and each such
+// failure cools the node down and moves it to the tail of the pool, so extra
+// attempts converge on a working node instead of repeating the same one. Keep
+// the budget for every other error, where a retry would just resend the same
+// rejected request.
+const MAX_ATTEMPTS_NODE_FAULT = 6;
+
+/** Does this error come from an upstream node returning 5xx? */
+function isNodeFault(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /\berror 5\d\d\b/.test(message);
+}
+
 const router = Router();
 
 // Whitelisted client request headers to forward to upstream providers.
@@ -89,18 +104,18 @@ router.post("/v1/chat/completions", requireAuth, async (req: Request, res: Respo
   let result: Awaited<ReturnType<typeof callOpenAI>> | undefined;
   let lastErr: unknown;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       result = await callProvider();
       break;
     } catch (err) {
       lastErr = err;
-      const message = err instanceof Error ? err.message : String(err);
-      if (attempt < MAX_ATTEMPTS) {
-        logger.warn({ err, attempt, maxAttempts: MAX_ATTEMPTS, provider }, `attempt ${attempt} failed, retrying with next node`);
-      } else {
-        logger.error({ err, attempt, provider }, "all attempts exhausted");
+      const limit = isNodeFault(err) ? MAX_ATTEMPTS_NODE_FAULT : MAX_ATTEMPTS;
+      if (attempt >= limit) {
+        logger.error({ err, attempt, limit, provider }, "all attempts exhausted");
+        break;
       }
+      logger.warn({ err, attempt, limit, provider }, "attempt failed, retrying");
     }
   }
 
