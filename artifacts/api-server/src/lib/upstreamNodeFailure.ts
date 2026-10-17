@@ -66,7 +66,7 @@ export function detectReplitNotRunning(body: string): string | null {
 }
 
 /** Pull `error.message` (or a top-level `message`) out of a JSON error body. */
-function extractErrorMessage(body: string): string | undefined {
+export function extractErrorMessage(body: string): string | undefined {
   try {
     const parsed = JSON.parse(body) as {
       error?: { message?: unknown } | string;
@@ -83,19 +83,24 @@ function extractErrorMessage(body: string): string | undefined {
   return undefined;
 }
 
+/** Pull `error.code` out of a JSON error body, e.g. `FREE_TIER_BUDGET_EXCEEDED`. */
+export function extractErrorCode(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown } };
+    if (typeof parsed.error?.code === "string" && parsed.error.code) return parsed.error.code;
+  } catch {
+    // not JSON
+  }
+  return undefined;
+}
+
 /**
  * Detect a free-tier budget/spend-limit error from the response body alone.
  * Returns the normalized reason code and a human-readable message, or null.
  */
 export function detectBudgetExceeded(body: string): { code: string; message: string } | null {
   if (!body) return null;
-  let code: string | undefined;
-  try {
-    const parsed = JSON.parse(body) as { error?: { code?: unknown } };
-    if (typeof parsed.error?.code === "string" && parsed.error.code) code = parsed.error.code;
-  } catch {
-    // not JSON — fall through to text matching
-  }
+  const code = extractErrorCode(body);
   const matched = BUDGET_EXCEEDED_PATTERNS.some((re) => re.test(body));
   if (!matched) return null;
   return {
@@ -255,19 +260,8 @@ export function maybeDisableSelectedNode(args: {
   // Try to extract a specific error code from the JSON body (e.g.
   // FREE_TIER_BUDGET_EXCEEDED); fall back to generic "forbidden".
   if (responseStatus === 403) {
-    let upstreamReason = "forbidden";
-    let lastError = responseBody.slice(0, 300);
-    try {
-      const parsed = JSON.parse(responseBody) as {
-        error?: { code?: unknown; message?: unknown };
-      };
-      if (typeof parsed.error?.code === "string" && parsed.error.code) {
-        upstreamReason = parsed.error.code;
-      }
-    } catch {
-      // body is not JSON — keep defaults
-    }
-    lastError = extractErrorMessage(responseBody) ?? lastError;
+    const upstreamReason = extractErrorCode(responseBody) ?? "forbidden";
+    const lastError = extractErrorMessage(responseBody) ?? responseBody.slice(0, 300);
     logger.warn(
       {
         nodeUrl: endpoint.nodeUrl,

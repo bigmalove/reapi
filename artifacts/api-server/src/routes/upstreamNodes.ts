@@ -13,7 +13,7 @@ import {
 } from "../lib/settings.js";
 import { getActiveCooldowns, setNodeCooldown, rotateNodeToEnd } from "../lib/providerEndpoint.js";
 import { probeNodes, probeNodeLlm } from "../lib/nodeProbe.js";
-import { detectBudgetExceeded } from "../lib/upstreamNodeFailure.js";
+import { detectBudgetExceeded, extractErrorCode, extractErrorMessage } from "../lib/upstreamNodeFailure.js";
 import { requireAuth } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
@@ -330,13 +330,22 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
 // window the request path uses (see upstreamNodeFailure.ts): the limit resets
 // monthly, and leaving such a node in the pool only makes it answer 403 to
 // every request that lands on it.
+//
+// Any OTHER 403 is disabled as well, with no recovery window, because that is
+// what the request path does for every 403 (upstreamNodeFailure.ts): the node
+// refuses the call whether the key was revoked, the deployment was suspended
+// or the account lost access. Quota is the only 403 that heals on its own.
 router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
   const settings = getSettings();
-  const urls = settings.reverseProxyPool.map((e) => e.url);
-  // Nodes in the pool inherit pool[0]'s key when their own is blank.
-  const apiKey = settings.reverseProxyPool[0]?.apiKey ?? "";
+  const pool = settings.reverseProxyPool;
+  const urls = pool.map((e) => e.url);
+  // Per-entry key, falling back to pool[0]'s key — the same rule the request
+  // path applies (providerEndpoint.ts). Probing everyone with pool[0]'s key
+  // would make a node with its own key answer 401/403 and look broken.
+  const defaultKey = pool[0]?.apiKey ?? "";
+  const keyByUrl = new Map(pool.map((e) => [e.url, e.apiKey || defaultKey]));
 
-  const results = await probeNodes(urls, (url) => probeNodeLlm(url, apiKey));
+  const results = await probeNodes(urls, (url) => probeNodeLlm(url, keyByUrl.get(url) ?? defaultKey));
 
   const disabled: string[] = [];
   const cooled: string[] = [];
@@ -353,6 +362,7 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
     let kind: string;
     if (r.online) kind = "ok";
     else if (budget) kind = "quota";
+    else if (r.status === 403) kind = "forbidden";
     else if (r.status === 500 && body) kind = "server-error-with-body";
     else if (r.status === 500) kind = "credential";
     else if (r.status === undefined) kind = "unreachable";
@@ -394,6 +404,25 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
         recoverAfterMs: FREE_TIER_RECOVERY_MS,
       });
       disabled.push(r.url);
+    } else if (kind === "forbidden") {
+      // Same treatment as the request path's 403 branch: a plain 403 means the
+      // node refuses the call and will keep refusing it, so it leaves the pool
+      // with no recovery window. Only a quota 403 (matched above) is time-boxed.
+      const upstreamReason = extractErrorCode(body) ?? "forbidden";
+      const lastError = extractErrorMessage(body)
+        ?? (body ? body.slice(0, 300) : "HTTP 403 with an empty response body");
+      logger.warn(
+        { nodeUrl: r.url, upstreamStatus: r.status, upstreamReason, message: lastError },
+        "upstream node returned 403 in AI check — removing node from pool",
+      );
+      disableUpstreamNode({
+        url: r.url,
+        disabledReason: "upstream-node-unavailable",
+        upstreamReason,
+        upstreamStatus: r.status,
+        lastError,
+      });
+      disabled.push(r.url);
     } else if (kind === "server-error-with-body") {
       logger.warn(
         { nodeUrl: r.url, upstreamStatus: r.status, body: body.slice(0, 200) },
@@ -411,6 +440,7 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
     disabled: disabled.length,
     cooled: cooled.length,
     quota: annotated.filter((r) => r.kind === "quota").length,
+    forbidden: annotated.filter((r) => r.kind === "forbidden").length,
     unreachable: annotated.filter((r) => r.kind === "unreachable").length,
     error: annotated.filter((r) => r.kind === "error").length,
   };

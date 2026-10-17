@@ -987,6 +987,12 @@ export default function ConfigPage() {
               hint: "FREE_TIER_BUDGET_EXCEEDED，本月免费额度用完。重新发布修不了，按月度周期屏蔽 31 天，到期自动放回池子。",
             },
             {
+              key: "forbidden" as const,
+              label: "403 拒绝访问 · 已屏蔽",
+              tone: "text-rose-400",
+              hint: "节点直接拒绝调用（key 失效、部署被停或账号没权限），不会自己恢复。重新发布或修好权限后，点「检测并恢复」放回来。",
+            },
+            {
               key: "unreachable" as const,
               label: "无响应 · 未处理",
               tone: "text-muted-foreground",
@@ -1019,6 +1025,10 @@ export default function ConfigPage() {
                 <span className="text-muted-foreground">|</span>
                 <span className={countOf("quota") > 0 ? "text-amber-400" : "text-muted-foreground"}>
                   额度耗尽已屏蔽 {countOf("quota")}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span className={countOf("forbidden") > 0 ? "text-rose-400" : "text-muted-foreground"}>
+                  403 拒绝已屏蔽 {countOf("forbidden")}
                 </span>
                 <span className="text-muted-foreground">|</span>
                 <span className="text-muted-foreground">

@@ -364,10 +364,11 @@ export interface NodeCheckResult {
    * - credential             500 with an empty body — no AI credential, needs a republish
    * - server-error-with-body 500 but the request reached upstream (transient), cooled down
    * - quota                  403 FREE_TIER_BUDGET_EXCEEDED — monthly quota, republishing cannot help
+   * - forbidden              any other 403 — access refused, no recovery window
    * - unreachable            no HTTP response at all (DNS / timeout / refused)
    * - error                  anything else
    */
-  kind?: "ok" | "credential" | "server-error-with-body" | "quota" | "unreachable" | "error";
+  kind?: "ok" | "credential" | "server-error-with-body" | "quota" | "forbidden" | "unreachable" | "error";
 }
 
 export interface NodeAiCheckResult {
@@ -380,6 +381,7 @@ export interface NodeAiCheckResult {
     disabled: number;
     cooled: number;
     quota: number;
+    forbidden: number;
     unreachable: number;
     error: number;
   };
@@ -396,10 +398,10 @@ export async function checkUpstreamNodes(): Promise<{ results: NodeCheckResult[]
 }
 
 /**
- * Send a 1-token LLM call through every pool node. Only nodes whose 500 has an
- * empty body are disabled (they cannot obtain an AI credential until the
- * deployment is republished); a 500 carrying a provider error body is merely
- * cooled down; quota exhaustion is reported but left in place.
+ * Send a 1-token LLM call through every pool node. A 500 with an empty body is
+ * disabled (it cannot obtain an AI credential until the deployment is
+ * republished); a 500 carrying a provider error body is merely cooled down;
+ * a quota 403 is disabled for 31 days and any other 403 is disabled outright.
  */
 export async function checkUpstreamNodesAi(): Promise<NodeAiCheckResult> {
   const res = await fetch(`${API_BASE}/upstream-nodes/check-ai`, {

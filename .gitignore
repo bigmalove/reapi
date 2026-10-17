@@ -48,3 +48,7 @@ Thumbs.db
 .cache/
 .local/
 artifacts/api-server/data/server_settings.json
+
+# Local tooling / scratch (project memory, throwaway test harnesses, store)
+.workbuddy/
+.pnpm-store/
