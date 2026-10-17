@@ -8,6 +8,7 @@ import messagesRouter from "./routes/v1/messages.js";
 import imagesRouter from "./routes/v1/images.js";
 import videosRouter from "./routes/v1/videos.js";
 import { logger } from "./lib/logger.js";
+import { BUILD_COMMIT, BUILD_TIME } from "./lib/buildInfo.js";
 
 const app: Express = express();
 
@@ -40,6 +41,12 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get("/healthz", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// Public on purpose: a commit stamp is not a secret, and the whole point is to
+// answer "is this deployment running my fix?" without an admin key.
+app.get("/api/build-info", (_req, res) => {
+  res.json({ commit: BUILD_COMMIT, builtAt: BUILD_TIME });
 });
 
 app.use(router);

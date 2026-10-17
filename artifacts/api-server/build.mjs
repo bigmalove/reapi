@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
@@ -9,6 +10,27 @@ import { rm } from "node:fs/promises";
 globalThis.require = createRequire(import.meta.url);
 
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
+
+// Stamp the bundle with the commit it was built from. Deployments are opaque —
+// the only way to tell a stale dist from a fresh one is to ask the running
+// process, and it can only answer if the value is baked in here.
+function readCommit() {
+  try {
+    const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: artifactDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return sha || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+const buildDefines = {
+  __BUILD_COMMIT__: JSON.stringify(readCommit()),
+  __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+};
 
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
@@ -22,6 +44,7 @@ async function buildAll() {
     outdir: distDir,
     outExtension: { ".js": ".mjs" },
     logLevel: "info",
+    define: buildDefines,
     // Some packages may not be bundleable, so we externalize them, we can add more here as needed.
     // Some of the packages below may not be imported or installed, but we're adding them in case they are in the future.
     // Examples of unbundleable packages:

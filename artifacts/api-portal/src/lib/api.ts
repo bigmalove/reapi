@@ -422,6 +422,24 @@ export async function checkDisabledUpstreamNodes(): Promise<{ results: NodeCheck
   return res.json();
 }
 
+export interface BuildInfo {
+  /** Short git commit the running bundle was built from ("dev" when unbundled). */
+  commit: string;
+  /** ISO timestamp of the build, not of the deploy. */
+  builtAt: string;
+}
+
+/**
+ * Which build the api-server is running. Public and unauthenticated — it is
+ * the one thing that distinguishes "my fix isn't deployed" from "my fix is
+ * deployed but the portal is stale".
+ */
+export async function fetchBuildInfo(): Promise<BuildInfo> {
+  const res = await fetch(`${API_BASE}/build-info`);
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
 export interface CopyFromResult {
   poolEntries: Array<{ url: string }>;
   disabledNodesImported: number;

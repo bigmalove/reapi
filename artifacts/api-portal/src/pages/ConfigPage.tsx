@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { Fragment, useState, useEffect, useRef } from "react";
 import {
   fetchSetupStatus,
   fetchSettings,
@@ -9,6 +9,7 @@ import {
   checkUpstreamNodes,
   checkUpstreamNodesAi,
   checkDisabledUpstreamNodes,
+  fetchBuildInfo,
   fetchAdminModels,
   fetchClaudeCodeModels,
   verifyKey,
@@ -24,6 +25,7 @@ import {
   type DisabledUpstreamNode,
   type NodeCheckResult,
   type NodeAiCheckResult,
+  type BuildInfo,
   type ClaudeModelObservation,
 } from "../lib/api";
 
@@ -129,6 +131,7 @@ export default function ConfigPage() {
   const [checkingAi, setCheckingAi] = useState(false);
   const [checkAiResult, setCheckAiResult] = useState<NodeAiCheckResult | null>(null);
   const [checkAiErr, setCheckAiErr] = useState("");
+  const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [checkingDisabled, setCheckingDisabled] = useState(false);
   const [checkDisabledResult, setCheckDisabledResult] = useState<{ results: NodeCheckResult[]; restored: string[] } | null>(null);
   const [checkDisabledErr, setCheckDisabledErr] = useState("");
@@ -253,6 +256,11 @@ export default function ConfigPage() {
         // 401 until the admin key is saved.
       });
     void refreshClaudeCodeModels();
+    fetchBuildInfo()
+      .then(setBuildInfo)
+      .catch(() => {
+        // Older deployments have no /api/build-info — no stamp is fine.
+      });
   }, []);
 
   // Poll cooldowns every 3 seconds so the countdown stays live.
@@ -940,6 +948,14 @@ export default function ConfigPage() {
           {!settings?.reverseProxyEnabled && (
             <span className="text-xs text-muted-foreground">已禁用 — 使用本地环境密钥</span>
           )}
+          {buildInfo && (
+            <span
+              className="text-[11px] text-muted-foreground font-mono"
+              title={`服务端构建：${buildInfo.builtAt}。和你本地最新的 commit 比较，就知道部署是不是落后的那一版。`}
+            >
+              服务端构建 {buildInfo.commit}
+            </span>
+          )}
         </div>
 
         {checkErr && <p className="text-xs text-destructive">检测失败：{checkErr}</p>}
@@ -967,80 +983,104 @@ export default function ConfigPage() {
         {checkAiErr && <p className="text-xs text-destructive">AI 可用性检测失败：{checkAiErr}</p>}
         {checkAiResult && (() => {
           const s = checkAiResult.summary;
-          const groups = [
+          // One table drives both the summary bar and the per-kind detail
+          // blocks. When the bar was hand-written, a kind added on the server
+          // simply never appeared here and its nodes vanished from the totals
+          // (the "93 个节点 / 可调用 78 / 屏蔽 6" mismatch). Deriving both from
+          // `kinds` makes that impossible: a new kind shows up as an unstyled
+          // row at worst, never as a silently missing count.
+          const kinds = [
             {
-              key: "credential" as const,
+              key: "ok",
+              short: "可调用",
+              label: "可调用",
+              tone: "text-green-400",
+              hint: "",
+              detail: false,
+            },
+            {
+              key: "credential",
+              short: "凭证失效已屏蔽",
               label: "500 空响应 · 已屏蔽",
               tone: "text-rose-400",
               hint: "进程还在，但签不出 AI 凭证。不会自动恢复（节点每 5 小时会重新注册，但这里会拒绝它回池）：重新发布该 Repl 后，点「检测并恢复」或「重新启用」放回来。",
+              detail: true,
             },
             {
-              key: "server-error-with-body" as const,
+              key: "server-error-with-body",
+              short: "已冷却",
               label: "500 带正文 · 已冷却轮换",
               tone: "text-amber-400",
               hint: "请求已经到达上游（能返回业务错误），说明凭证是好的，属于上游或平台临时抖动。只降到队尾冷却 60 秒，不移出池子。",
+              detail: true,
             },
             {
-              key: "quota" as const,
+              key: "quota",
+              short: "额度耗尽已屏蔽",
               label: "403 额度耗尽 · 已屏蔽",
               tone: "text-amber-400",
               hint: "FREE_TIER_BUDGET_EXCEEDED，本月免费额度用完。重新发布修不了，按月度周期屏蔽 31 天，到期自动放回池子。",
+              detail: true,
             },
             {
-              key: "forbidden" as const,
+              key: "forbidden",
+              short: "403 拒绝已屏蔽",
               label: "403 拒绝访问 · 已屏蔽",
               tone: "text-rose-400",
               hint: "节点直接拒绝调用（key 失效、部署被停或账号没权限），不会自己恢复。重新发布或修好权限后，点「检测并恢复」放回来。",
+              detail: true,
             },
             {
-              key: "unreachable" as const,
+              key: "unreachable",
+              short: "无响应",
               label: "无响应 · 未处理",
               tone: "text-muted-foreground",
               hint: "完全连不上（DNS / 超时 / 连接被拒）。可用「检测节点状态」按离线处理。",
+              detail: true,
             },
             {
-              key: "error" as const,
+              key: "error",
+              short: "其他",
               label: "其他错误 · 未处理",
               tone: "text-muted-foreground",
               hint: "",
+              detail: true,
             },
           ];
           const countOf = (k: string) => checkAiResult.results.filter((r) => r.kind === k).length;
+          const counted = kinds.reduce((n, k) => n + countOf(k.key), 0);
+          const unclassified = s.total - counted;
           return (
             <div className="rounded-md border border-border bg-secondary/10 p-3 text-xs space-y-2">
               <div className="font-medium text-foreground">
                 已用 1 token 实测 {s.total} 个节点
+                {buildInfo && (
+                  <span className="ml-2 font-normal text-[11px] text-muted-foreground">
+                    构建 {buildInfo.commit} · {buildInfo.builtAt.replace("T", " ").slice(0, 16)}Z
+                  </span>
+                )}
               </div>
 
               <div className="flex flex-wrap gap-x-3 gap-y-1">
-                <span className="text-green-400">可调用 {s.ok}</span>
-                <span className="text-muted-foreground">|</span>
-                <span className={countOf("credential") > 0 ? "text-rose-400" : "text-muted-foreground"}>
-                  凭证失效已屏蔽 {countOf("credential")}
-                </span>
-                <span className="text-muted-foreground">|</span>
-                <span className={countOf("server-error-with-body") > 0 ? "text-amber-400" : "text-muted-foreground"}>
-                  已冷却 {countOf("server-error-with-body")}
-                </span>
-                <span className="text-muted-foreground">|</span>
-                <span className={countOf("quota") > 0 ? "text-amber-400" : "text-muted-foreground"}>
-                  额度耗尽已屏蔽 {countOf("quota")}
-                </span>
-                <span className="text-muted-foreground">|</span>
-                <span className={countOf("forbidden") > 0 ? "text-rose-400" : "text-muted-foreground"}>
-                  403 拒绝已屏蔽 {countOf("forbidden")}
-                </span>
-                <span className="text-muted-foreground">|</span>
-                <span className="text-muted-foreground">
-                  无响应 {countOf("unreachable")}
-                </span>
-                <span className="text-muted-foreground">|</span>
-                <span className="text-muted-foreground">
-                  其他 {countOf("error")}
-                </span>
+                {kinds.map((k, i) => (
+                  <Fragment key={k.key}>
+                    {i > 0 && <span className="text-muted-foreground">|</span>}
+                    <span className={countOf(k.key) > 0 ? k.tone : "text-muted-foreground"}>
+                      {k.short} {countOf(k.key)}
+                    </span>
+                  </Fragment>
+                ))}
               </div>
 
-              {groups.map((g) => {
+              {unclassified !== 0 && (
+                <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-400">
+                  合计 {counted} / {s.total}：还有 {unclassified} 个节点没有归入任何一类。
+                  说明这次检测的响应里带了本页还不认识的分类——多半是门户构建落后于服务端，
+                  重新发布（或强制刷新）后再看。
+                </div>
+              )}
+
+              {kinds.filter((k) => k.detail).map((g) => {
                 const nodes = checkAiResult.results.filter((r) => r.kind === g.key);
                 if (nodes.length === 0) return null;
                 return (
