@@ -8,11 +8,13 @@ import {
   NODE_PROBE_OFFLINE,
   NODE_SERVER_ERROR,
   SERVER_ERROR_RECOVERY_MS,
+  FREE_TIER_RECOVERY_MS,
   type DisabledUpstreamNode,
   type UpstreamNodeType,
 } from "../lib/settings.js";
-import { getActiveCooldowns } from "../lib/providerEndpoint.js";
+import { getActiveCooldowns, setNodeCooldown, rotateNodeToEnd } from "../lib/providerEndpoint.js";
 import { probeNodes, probeNodeLlm } from "../lib/nodeProbe.js";
+import { detectBudgetExceeded } from "../lib/upstreamNodeFailure.js";
 import { requireAuth } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
@@ -320,9 +322,15 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
 // fixes it. Since the pool is consumed through sticky pool[0], a node like that
 // at the head breaks every request, and left in the pool it keeps coming back.
 //
-// Only 500 disables a node here. Other failures (quota, timeouts, transient
-// provider errors) leave it in place: they are either not node-local or already
-// handled by the cooldown path.
+// Only an EMPTY 500 disables a node here. A 500 that carries a provider error
+// body proves the credential was issued — the request reached upstream — so it
+// is a transient upstream problem (e.g. Replit's own rate-limit lookup
+// failing) and merely gets cooled down.
+//
+// Exhausted free-tier quota is disabled too, with the same 31-day recovery
+// window the request path uses (see upstreamNodeFailure.ts): the limit resets
+// monthly, and leaving such a node in the pool only makes it answer 403 to
+// every request that lands on it.
 router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
   const settings = getSettings();
   const urls = settings.reverseProxyPool.map((e) => e.url);
@@ -332,33 +340,83 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
   const results = await probeNodes(urls, (url) => probeNodeLlm(url, apiKey));
 
   const disabled: string[] = [];
+  const cooled: string[] = [];
+  const annotated = [];
+
   for (const r of results) {
-    if (r.online || r.status !== 500) continue;
+    const body = (r.bodyText ?? "").trim();
+    // Reuse the request path's detector so a budget error is recognised the
+    // same way regardless of which status code carried it.
+    const budget = detectBudgetExceeded(body);
+
+    // Classify so the portal can explain every node instead of hiding the
+    // remainder behind an "other" count.
+    let kind: string;
+    if (r.online) kind = "ok";
+    else if (budget) kind = "quota";
+    else if (r.status === 500 && body) kind = "server-error-with-body";
+    else if (r.status === 500) kind = "credential";
+    else if (r.status === undefined) kind = "unreachable";
+    else kind = "error";
+
+    annotated.push({ ...r, bodyText: undefined, contentType: undefined, kind });
+
     // The pool may have changed while probing — only touch nodes still in it.
     if (!getSettings().reverseProxyPool.some((e) => e.url === r.url)) continue;
-    logger.warn(
-      { nodeUrl: r.url, upstreamStatus: r.status, message: r.error },
-      "upstream node returned 500 in AI check — removing node from pool",
-    );
-    // probeNodeLlm formats its error as `HTTP <status>: <body>`; a credential
-    // failure comes back with an empty body, which would render as a bare
-    // "HTTP 500: " in the portal. Say what it actually means instead.
-    const lastError = (r.error ?? "").replace(/^HTTP 500:\s*$/, "").trim()
-      || "HTTP 500 with an empty response body — the node cannot obtain an AI credential; republish the Repl to fix it";
-    disableUpstreamNode({
-      url: r.url,
-      disabledReason: "upstream-node-unavailable",
-      upstreamReason: NODE_SERVER_ERROR,
-      upstreamStatus: r.status,
-      lastError,
-      recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
-    });
-    disabled.push(r.url);
+
+    if (kind === "credential") {
+      logger.warn(
+        { nodeUrl: r.url, upstreamStatus: r.status },
+        "upstream node cannot obtain an AI credential in AI check — removing node from pool",
+      );
+      disableUpstreamNode({
+        url: r.url,
+        disabledReason: "upstream-node-unavailable",
+        upstreamReason: NODE_SERVER_ERROR,
+        upstreamStatus: r.status,
+        lastError:
+          "HTTP 500 with an empty response body — the node cannot obtain an AI credential; republish the Repl to fix it",
+        recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
+      });
+      disabled.push(r.url);
+    } else if (kind === "quota") {
+      const recoverAt = new Date(Date.now() + FREE_TIER_RECOVERY_MS).toISOString();
+      logger.warn(
+        { nodeUrl: r.url, upstreamStatus: r.status, upstreamReason: budget?.code, recoverAt },
+        "upstream node free-tier budget exceeded in AI check — removing node from pool for 31 days",
+      );
+      disableUpstreamNode({
+        url: r.url,
+        disabledReason: "upstream-node-unavailable",
+        upstreamReason: budget?.code ?? "FREE_TIER_BUDGET_EXCEEDED",
+        upstreamStatus: r.status,
+        lastError: budget?.message ?? "Free tier monthly spend limit exceeded",
+        recoverAfterMs: FREE_TIER_RECOVERY_MS,
+      });
+      disabled.push(r.url);
+    } else if (kind === "server-error-with-body") {
+      logger.warn(
+        { nodeUrl: r.url, upstreamStatus: r.status, body: body.slice(0, 200) },
+        "upstream node returned 500 with a body in AI check — cooling down",
+      );
+      setNodeCooldown(r.url);
+      rotateNodeToEnd(r.url);
+      cooled.push(r.url);
+    }
   }
 
-  res.json({ results, disabled });
-});
+  const summary = {
+    total: annotated.length,
+    ok: annotated.filter((r) => r.kind === "ok").length,
+    disabled: disabled.length,
+    cooled: cooled.length,
+    quota: annotated.filter((r) => r.kind === "quota").length,
+    unreachable: annotated.filter((r) => r.kind === "unreachable").length,
+    error: annotated.filter((r) => r.kind === "error").length,
+  };
 
+  res.json({ results: annotated, disabled, cooled, summary });
+});
 // Send a real (1-token) LLM call through every disabled node and restore the
 // ones that answer. Dev nodes are skipped — they are always kept disabled.
 router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {  const settings = getSettings();

@@ -14,6 +14,14 @@ export interface NodeProbeResult {
   /** upstreamReason to record when the node is offline. */
   reason?: string;
   error?: string;
+  /**
+   * Raw response body and content type from the LLM probe. Callers need these
+   * to tell an empty 500 (the node cannot obtain an AI credential — only a
+   * republish fixes it) from a 500 that carries a provider error body (the
+   * credential works, the upstream is briefly unhappy).
+   */
+  bodyText?: string;
+  contentType?: string;
 }
 
 /**
@@ -70,10 +78,14 @@ export async function probeNode(url: string): Promise<NodeProbeResult> {
  * route. Unlike `probeNode`, this also catches nodes that are up but
  * out of budget, so a pass means the node is safe to put back in the pool.
  */
-export async function probeNodeLlm(url: string, apiKey: string): Promise<NodeProbeResult> {
+export async function probeNodeLlm(
+  url: string,
+  apiKey: string,
+  { fetchImpl = globalThis.fetch }: { fetchImpl?: typeof fetch } = {},
+): Promise<NodeProbeResult> {
   const started = Date.now();
   try {
-    const response = await fetch(`${url}/modelfarm/anthropic/v1/messages`, {
+    const response = await fetchImpl(`${url}/modelfarm/anthropic/v1/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -90,6 +102,7 @@ export async function probeNodeLlm(url: string, apiKey: string): Promise<NodePro
     const body = await response.text().catch(() => "");
     const latencyMs = Date.now() - started;
     const status = response.status;
+    const contentType = response.headers.get("content-type") ?? "";
 
     let hasContent = false;
     try {
@@ -97,9 +110,11 @@ export async function probeNodeLlm(url: string, apiKey: string): Promise<NodePro
     } catch {
       // not JSON
     }
-    if (response.ok && hasContent) return { url, online: true, status, latencyMs };
+    if (response.ok && hasContent) {
+      return { url, online: true, status, latencyMs, bodyText: "", contentType };
+    }
     return {
-      url, online: false, status, latencyMs,
+      url, online: false, status, latencyMs, bodyText: body, contentType,
       error: `HTTP ${status}: ${body.slice(0, 300)}`,
     };
   } catch (err: unknown) {

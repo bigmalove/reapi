@@ -21,6 +21,7 @@ import {
   type PoolEntryPatch,
   type DisabledUpstreamNode,
   type NodeCheckResult,
+  type NodeAiCheckResult,
 } from "../lib/api";
 
 const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
@@ -123,7 +124,7 @@ export default function ConfigPage() {
   const [checkResult, setCheckResult] = useState<{ results: NodeCheckResult[]; disabled: string[] } | null>(null);
   const [checkErr, setCheckErr] = useState("");
   const [checkingAi, setCheckingAi] = useState(false);
-  const [checkAiResult, setCheckAiResult] = useState<{ results: NodeCheckResult[]; disabled: string[] } | null>(null);
+  const [checkAiResult, setCheckAiResult] = useState<NodeAiCheckResult | null>(null);
   const [checkAiErr, setCheckAiErr] = useState("");
   const [checkingDisabled, setCheckingDisabled] = useState(false);
   const [checkDisabledResult, setCheckDisabledResult] = useState<{ results: NodeCheckResult[]; restored: string[] } | null>(null);
@@ -885,30 +886,93 @@ export default function ConfigPage() {
         )}
 
         {checkAiErr && <p className="text-xs text-destructive">AI 可用性检测失败：{checkAiErr}</p>}
-        {checkAiResult && (
-          <div className="rounded-md border border-border bg-secondary/10 p-3 text-xs space-y-1">
-            <div>
-              已用 1 token 实测 {checkAiResult.results.length} 个节点：
-              <span className="text-green-400">
-                可调用 {checkAiResult.results.filter((r) => r.online).length}
-              </span>
-              <span className="text-muted-foreground"> / </span>
-              <span className={checkAiResult.disabled.length > 0 ? "text-rose-400" : "text-muted-foreground"}>
-                返回 500 并已屏蔽 {checkAiResult.disabled.length}
-              </span>
-            </div>
-            {checkAiResult.disabled.length > 0 && (
-              <p className="text-[11px] text-muted-foreground">
-                这类节点进程仍在运行，但拿不到 AI 凭证（HTTP 500 空响应），需要重新发布该 Repl 才能恢复；6 小时后会自动放回池子重试。
-              </p>
-            )}
-            {checkAiResult.disabled.map((url) => (
-              <div key={url} className="text-[11px] text-muted-foreground break-all">
-                <span className="font-mono text-foreground">{url}</span>
+        {checkAiResult && (() => {
+          const s = checkAiResult.summary;
+          const groups = [
+            {
+              key: "credential" as const,
+              label: "500 空响应 · 已屏蔽",
+              tone: "text-rose-400",
+              hint: "进程还在，但签不出 AI 凭证。必须重新发布该 Repl 才能恢复；6 小时后自动放回池子重试，仍坏则再次被移出。",
+            },
+            {
+              key: "server-error-with-body" as const,
+              label: "500 带正文 · 已冷却轮换",
+              tone: "text-amber-400",
+              hint: "请求已经到达上游（能返回业务错误），说明凭证是好的，属于上游或平台临时抖动。只降到队尾冷却 60 秒，不移出池子。",
+            },
+            {
+              key: "quota" as const,
+              label: "403 额度耗尽 · 已屏蔽",
+              tone: "text-amber-400",
+              hint: "FREE_TIER_BUDGET_EXCEEDED，本月免费额度用完。重新发布修不了，按月度周期屏蔽 31 天，到期自动放回池子。",
+            },
+            {
+              key: "unreachable" as const,
+              label: "无响应 · 未处理",
+              tone: "text-muted-foreground",
+              hint: "完全连不上（DNS / 超时 / 连接被拒）。可用「检测节点状态」按离线处理。",
+            },
+            {
+              key: "error" as const,
+              label: "其他错误 · 未处理",
+              tone: "text-muted-foreground",
+              hint: "",
+            },
+          ];
+          const countOf = (k: string) => checkAiResult.results.filter((r) => r.kind === k).length;
+          return (
+            <div className="rounded-md border border-border bg-secondary/10 p-3 text-xs space-y-2">
+              <div className="font-medium text-foreground">
+                已用 1 token 实测 {s.total} 个节点
               </div>
-            ))}
-          </div>
-        )}
+
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                <span className="text-green-400">可调用 {s.ok}</span>
+                <span className="text-muted-foreground">|</span>
+                <span className={countOf("credential") > 0 ? "text-rose-400" : "text-muted-foreground"}>
+                  凭证失效已屏蔽 {countOf("credential")}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span className={countOf("server-error-with-body") > 0 ? "text-amber-400" : "text-muted-foreground"}>
+                  已冷却 {countOf("server-error-with-body")}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span className={countOf("quota") > 0 ? "text-amber-400" : "text-muted-foreground"}>
+                  额度耗尽已屏蔽 {countOf("quota")}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span className="text-muted-foreground">
+                  无响应 {countOf("unreachable")}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span className="text-muted-foreground">
+                  其他 {countOf("error")}
+                </span>
+              </div>
+
+              {groups.map((g) => {
+                const nodes = checkAiResult.results.filter((r) => r.kind === g.key);
+                if (nodes.length === 0) return null;
+                return (
+                  <div key={g.key} className="rounded border border-border/60 bg-background/40 p-2 space-y-1">
+                    <div className={`${g.tone} font-medium`}>
+                      {g.label} · {nodes.length} 个
+                    </div>
+                    {g.hint && <div className="text-[11px] text-muted-foreground">{g.hint}</div>}
+                    {nodes.map((r) => (
+                      <div key={r.url} className="text-[11px] text-muted-foreground break-all">
+                        <span className="font-mono text-foreground">{r.url}</span>
+                        {r.status !== undefined && <span> — HTTP {r.status}</span>}
+                        {r.error && r.kind === "error" && <span> — {r.error.slice(0, 80)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {importOk && (
           <p className="text-xs text-green-400">✓ 导入成功（含屏蔽节点已并入草稿），请检查后点击"保存代理池"</p>
