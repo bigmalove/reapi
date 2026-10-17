@@ -4,7 +4,7 @@ import { detectBudgetExceeded, extractErrorCode, extractErrorMessage } from "./u
 import { logger } from "./logger.js";
 
 /** How many entries to re-probe on boot, and how many at a time. */
-const MAX_RECHECK = 25;
+const MAX_RECHECK = 50;
 const CONCURRENCY = 4;
 
 /**
@@ -27,17 +27,26 @@ const CONCURRENCY = 4;
  * the server coming up. Failures are per-entry and non-fatal.
  */
 export async function recheckQuestionableDisabledNodes(): Promise<void> {
-  const candidates = getSettings().disabledUpstreamNodes
+  const all = getSettings().disabledUpstreamNodes
     .filter((e) => e.type !== "replit-dev")
+    // The signature of the old bug is narrow, so the sweep stays narrow: an
+    // entry recorded as `forbidden`, or one whose error text says the response
+    // body was empty. Matching every entry with a blank `upstreamReason` would
+    // burn a token on hundreds of legacy rows that are not in question.
     .filter(
       (e) =>
         e.upstreamReason === "forbidden" ||
-        e.upstreamReason === undefined ||
         /empty response body/i.test(e.lastError ?? ""),
-    )
-    .slice(0, MAX_RECHECK);
+    );
+  const candidates = all.slice(0, MAX_RECHECK);
 
   if (candidates.length === 0) return;
+  if (all.length > candidates.length) {
+    logger.warn(
+      { total: all.length, probing: candidates.length },
+      "more mislabelled disabled nodes than one boot sweep covers — the rest will be relabelled by the next 检测并恢复",
+    );
+  }
   logger.info({ count: candidates.length }, "re-probing disabled nodes recorded on an unreadable answer");
 
   const apiKey = getSettings().reverseProxyPool[0]?.apiKey ?? "";
