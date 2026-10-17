@@ -164,13 +164,25 @@ mapping first):
 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | `claude-sonnet-4-5` (Bedrock/Vertex prefix) |
 | `claude-sonnet-4.5` | `claude-sonnet-4-5` (`4.5` == `4-5`) |
 | `claude-3-5-haiku-20241022` | `claude-haiku-4-5` (retired version → newest *enabled* of family) |
+| `claude-opus-5-5` (registry only has 5.0) | **404** — no silent downgrade, see below |
 | `claude-*-fast` / `-1m` / `-latest` | same model without the serving marker |
 | `claude-*-thinking[-level]` | base model + thinking enabled at that level |
 
 The family fallback (newest **enabled** `claude-<opus|sonnet|haiku>-*` in the
-registry) is what keeps retired ids such as `claude-3-5-sonnet-20241022`
-working; it is reported in the request log as `match: "family"`. Unknown ids
-return `404 not_found_error` unless a `*` fallback is configured.
+registry) exists for retired ids such as `claude-3-5-sonnet-20241022`; it is
+reported in the request log as `match: "family"`. It **only fires when the
+requested version is at or below the newest registered version**: asking for
+`claude-opus-5-5` while only `claude-opus-5` is registered returns
+`404 not_found_error` instead of quietly serving the older model. Serving an
+older model is a downgrade the caller never asked for and cannot see — the
+error names the id and points at the mapping setting. Add the model (or map it)
+to use it.
+
+`anthropic/claude-opus-5.5`, `anthropic/claude-sonnet-5.5` and
+`anthropic/claude-haiku-5.5` are registered as OpenRouter models (ids verified
+against `https://openrouter.ai/api/v1/models`), with the usual `-thinking*`
+variants. The Anthropic direct integration has no 5.5 endpoint, so those ids
+route through OpenRouter.
 
 ### Model mapping (admin portal → Configuration)
 
@@ -201,6 +213,26 @@ curl -X POST $GW/api/settings -H "Authorization: Bearer $KEY" \
   sent recently (in-memory, 50 entries) with the id each resolved to, the match
   kind, request count and whether the target is disabled — the portal renders
   it under the mapping editor with one-click「加映射」.
+
+### Upstream errors are relayed, not flattened to 502
+
+The converted path (any non-Anthropic provider) reports the upstream's own
+status and message: a 404 from OpenRouter (`No endpoints found for …`) arrives
+as `404 not_found_error`, a 400 as `invalid_request_error`, a 429 as
+`rate_limit_error`. Only 5xx and network failures become `502 api_error`.
+A 4xx is never retried — the same request would be rejected identically — so
+the client sees the real cause on the first attempt. `UpstreamHttpError`
+(`lib/upstreamError.ts`) carries the status; providers throw it instead of a
+bare `Error`.
+
+Claude models routed through OpenRouter are pinned to
+`provider.order: ["amazon-bedrock", "claude-on-aws", "anthropic"]` with
+`allow_fallbacks: true`. The previous pin, `["amazon-bedrock/claude-on-aws"]`
+with fallbacks disabled, used a provider slug OpenRouter does not define, so
+any Claude id that channel could not serve came back as a gateway 502
+(`anthropic/claude-opus-5.5` is the first id that hit it). Bedrock is still
+preferred for cost; the other Claude channels are fallbacks rather than hard
+failures.
 
 **Anthropic beta flags.** Claude Code sends `anthropic-beta` values meant for
 its own first-party OAuth session: `oauth-2025-04-20` and `claude-code-*`. A

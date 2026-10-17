@@ -1,6 +1,7 @@
 import { logger } from "../lib/logger.js";
 import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
+import { UpstreamHttpError } from "../lib/upstreamError.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -433,7 +434,7 @@ export async function callAnthropic(
   if (!response.ok) {
     const text = await response.text();
     maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new Error(`Anthropic error ${response.status}: ${text}`);
+    throw new UpstreamHttpError("Anthropic", response.status, text);
   }
 
   if (request.stream) {

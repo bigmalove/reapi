@@ -1,5 +1,6 @@
 import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
+import { UpstreamHttpError } from "../lib/upstreamError.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -322,7 +323,7 @@ export async function callGemini(
   if (!response.ok) {
     const text = await response.text();
     maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new Error(`Gemini error ${response.status}: ${text}`);
+    throw new UpstreamHttpError("Gemini", response.status, text);
   }
 
   if (request.stream) {

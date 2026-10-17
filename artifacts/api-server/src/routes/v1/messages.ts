@@ -13,6 +13,7 @@ import {
   handleEmptyUpstreamStream,
   maybeDisableSelectedNode,
 } from "../../lib/upstreamNodeFailure.js";
+import { asUpstreamHttpError, looksLikeUnknownModel } from "../../lib/upstreamError.js";
 import {
   getModelObservations,
   recordModelObservation,
@@ -494,6 +495,68 @@ async function proxyAnthropicNative(args: {
 
 // ── Converted path (any non-Anthropic provider) ─────────────────────────────
 
+/**
+ * Report a failed converted request with the upstream's own status and message.
+ *
+ * A mapped id such as `anthropic/claude-opus-5.5` is routed to OpenRouter; when
+ * OpenRouter rejects it (unknown slug, no endpoint for the requested channel,
+ * quota), the client needs that answer, not a generic 502. A 404 also carries
+ * the fix: the id is not in the gateway registry, so it must be added or mapped.
+ */
+function relayConvertedFailure(
+  res: ExpressResponse,
+  err: unknown,
+  model: string,
+  requestedModel: string,
+  provider: string,
+): void {
+  const upstream = asUpstreamHttpError(err);
+  const rawBody = upstream?.body ?? (err instanceof Error ? err.message : String(err));
+
+  let message = rawBody;
+  try {
+    const parsed = JSON.parse(rawBody) as { error?: { message?: unknown } | string; message?: unknown };
+    if (typeof parsed.error === "string") message = parsed.error;
+    else if (parsed.error && typeof parsed.error.message === "string") message = parsed.error.message;
+    else if (typeof parsed.message === "string") message = parsed.message;
+  } catch {
+    // not JSON — keep the raw text
+  }
+  message = message.slice(0, 2000);
+
+  const status = upstream?.status ?? 502;
+  const unknownModel = upstream?.status === 404 || looksLikeUnknownModel(rawBody);
+
+  if (unknownModel) {
+    const hint = ` ${provider} has no such model id. Add it in 模型管理, or map "${requestedModel}" to an existing model in 配置 → Claude Code 模型映射.`;
+    logger.warn(
+      { model, requestedModel, provider, upstreamStatus: upstream?.status ?? null, message },
+      "claude code upstream rejected the model id",
+    );
+    res.status(404).json(
+      anthropicError(
+        "not_found_error",
+        (model === requestedModel
+          ? `model: ${requestedModel}.${hint}`
+          : `model ${requestedModel} is mapped to ${model}.${hint}`) + ` Upstream said: ${message}`,
+      ),
+    );
+    return;
+  }
+
+  if (upstream?.isClientError) {
+    res.status(upstream.status).json(anthropicError(statusToErrorType(upstream.status), message));
+    return;
+  }
+
+  if (status === 429) {
+    res.status(429).json(anthropicError("rate_limit_error", message));
+    return;
+  }
+
+  res.status(502).json(anthropicError("api_error", message));
+}
+
 async function proxyConverted(args: {
   res: ExpressResponse;
   body: AnthropicMessagesBody;
@@ -519,6 +582,10 @@ async function proxyConverted(args: {
       break;
     } catch (err) {
       lastErr = err;
+      // A 4xx (other than 429) names something only the caller can fix — an
+      // unknown model id, a rejected parameter. Retrying sends the same
+      // request to the same rejection, and reporting 502 would hide the reason.
+      if (asUpstreamHttpError(err)?.isClientError) break;
       const limit = isNodeFault(err) ? MAX_ATTEMPTS_NODE_FAULT : MAX_ATTEMPTS;
       if (attempt >= limit) {
         logger.error({ err, attempt, limit, provider }, "claude code conversion attempts exhausted");
@@ -529,8 +596,7 @@ async function proxyConverted(args: {
   }
 
   if (result === undefined) {
-    const message = lastErr instanceof Error ? lastErr.message : "Upstream error";
-    res.status(502).json(anthropicError("api_error", message));
+    relayConvertedFailure(res, lastErr, model, requestedModel, provider);
     return;
   }
 

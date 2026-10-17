@@ -1,6 +1,7 @@
 import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from "../types.js";
 import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
+import { UpstreamHttpError } from "../lib/upstreamError.js";
 
 // Models that behave like reasoning models (use max_completion_tokens, no temperature/top_p)
 const REASONING_MODELS = new Set(["gpt-5.5"]);
@@ -110,7 +111,7 @@ export async function callOpenAI(
   if (!response.ok) {
     const text = await response.text();
     maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new Error(`OpenAI error ${response.status}: ${text}`);
+    throw new UpstreamHttpError("OpenAI", response.status, text);
   }
 
   if (request.stream) {

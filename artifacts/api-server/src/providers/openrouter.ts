@@ -1,6 +1,7 @@
 import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from "../types.js";
 import { resolveProviderEndpoint, type ProviderEndpoint } from "../lib/providerEndpoint.js";
 import { handleEmptyUpstreamStream, maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
+import { UpstreamHttpError } from "../lib/upstreamError.js";
 import { logger } from "../lib/logger.js";
 import {
   planSyntheticStreamShim,
@@ -111,11 +112,17 @@ export async function callOpenRouter(
     model: actualModel,
   };
 
-  // Force AWS Bedrock's Claude-on-AWS channel for all Claude models.
+  // Claude routing. `amazon-bedrock/claude-on-aws` is not a valid OpenRouter
+  // provider slug — the real endpoint tags are `amazon-bedrock`,
+  // `claude-on-aws`, `anthropic`, `azure/global`, `google-vertex/…`. Pinning an
+  // id that does not exist, with fallbacks disabled, made OpenRouter reject
+  // every request for models it could not match on that one channel
+  // (`anthropic/claude-opus-5.5` arrived as a gateway 502). Prefer Bedrock for
+  // cost, but let OpenRouter fall back to the other Claude channels.
   if (isClaude) {
     body["provider"] = {
-      order: ["amazon-bedrock/claude-on-aws"],
-      allow_fallbacks: false,
+      order: ["amazon-bedrock", "claude-on-aws", "anthropic"],
+      allow_fallbacks: true,
     };
   }
 
@@ -313,7 +320,7 @@ export async function callOpenRouter(
   if (!response.ok) {
     const text = await response.text();
     maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new Error(`OpenRouter error ${response.status}: ${text}`);
+    throw new UpstreamHttpError("OpenRouter", response.status, text);
   }
 
   if (request.stream) {

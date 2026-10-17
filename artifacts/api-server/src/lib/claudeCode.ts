@@ -1,4 +1,5 @@
 import { getModelRegistry, isThinkingVariantId, resolveProvider } from "./models.js";
+import { logger } from "./logger.js";
 
 /**
  * Claude Code compatibility helpers.
@@ -91,18 +92,22 @@ function canonicalKey(id: string): string {
  *
  * Resolution order: operator mapping → exact → whitespace/Bedrock normalised →
  * canonical (`4.5` == `4-5`, dates dropped) → serving-mode marker stripped
- * (`-fast`/`-1m`/`-latest`) → family fallback (newest enabled
- * `claude-<family>-*`).
+ * (`-fast`/`-1m`/`-latest`) → family fallback (newest **enabled**
+ * `claude-<family>-*`), and only for versions at or below what the registry
+ * already has.
  *
  * The operator mapping (`settings.claudeCodeModelMap`) is consulted first so an
  * explicit choice always wins over the heuristics — that is what lets a client
  * id such as `claude-haiku-5-5` be pinned to whichever model the operator wants
  * (including a model from another provider) without reconfiguring the client.
  *
- * The family fallback is what keeps retired ids such as
- * `claude-3-5-haiku-20241022` working: the exact version is gone from the
- * registry, so the request lands on the newest model of that family — preferring
- * an enabled one, so a disabled sibling does not fail the request.
+ * The family fallback exists for retired ids: `claude-3-5-haiku-20241022` is no
+ * longer served, so the request lands on the newest model of that family. It
+ * deliberately does NOT fire when the client asks for a NEWER version than the
+ * registry has (`claude-opus-5-5` while only `claude-opus-5` is registered):
+ * silently serving an older model is a downgrade the caller never asked for and
+ * cannot see. Those ids stay unresolved, so the request fails with a message
+ * naming the id and pointing at the mapping setting.
  */
 export function resolveClaudeCodeModel(
   requested: string,
@@ -154,6 +159,7 @@ export function resolveClaudeCodeModel(
 
   const family = target.match(/(?:^|-)(opus|sonnet|haiku)(?:-|$)/)?.[1];
   if (family && (target.startsWith("claude-") || target.startsWith("anthropic-claude-"))) {
+    const requestedVersion = familyVersion(target, family);
     // Newest first; prefer an enabled model so one disabled entry does not turn
     // every request for a retired id into a 400.
     const candidates = bases
@@ -161,10 +167,56 @@ export function resolveClaudeCodeModel(
       .sort((a, b) => b.created - a.created);
     const preferred =
       (options.isUsable ? candidates.find((m) => options.isUsable!(m.id)) : undefined) ?? candidates[0];
-    if (preferred) return { requested, model: preferred.id, match: "family" };
+
+    if (preferred) {
+      const newestVersion = familyVersion(canonicalKey(preferred.id), family);
+      const newer = compareVersions(requestedVersion, newestVersion) > 0;
+      if (newer) {
+        logger.warn(
+          {
+            requested: trimmed,
+            family,
+            requestedVersion,
+            newestRegistered: preferred.id,
+            newestVersion,
+          },
+          "claude code model asks for a newer version than the registry has — not falling back to an older one",
+        );
+        return { requested, model: cleaned || trimmed, match: "unmapped" };
+      }
+      return { requested, model: preferred.id, match: "family" };
+    }
   }
 
   return { requested, model: cleaned || trimmed, match: "unmapped" };
+}
+
+/**
+ * Version tuple of a Claude id relative to its family token.
+ * `claude-opus-5-5` → `[5,5]`, `claude-3-5-haiku` → `[3,5]` (version before the
+ * family token), `claude-opus-latest` → `[]`.
+ */
+function familyVersion(id: string, family: string): number[] {
+  const parts = id.split("-");
+  const index = parts.indexOf(family);
+  if (index === -1) return [];
+  const before = parts.slice(0, index).filter((part) => /^\d+$/.test(part)).map(Number);
+  const after = parts.slice(index + 1).filter((part) => /^\d+$/.test(part)).map(Number);
+  // `claude-3-5-haiku-20241022` puts the version before the family and the date
+  // after it; dates are 8 digits, so drop them before comparing.
+  const afterShort = after.filter((part) => part < 10000);
+  if (afterShort.length > 0) return afterShort;
+  return before;
+}
+
+/** Lexicographic compare of version tuples; missing entries count as 0. */
+function compareVersions(a: number[], b: number[]): number {
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
 }
 
 /**
