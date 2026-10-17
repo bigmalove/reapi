@@ -331,10 +331,23 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
 // monthly, and leaving such a node in the pool only makes it answer 403 to
 // every request that lands on it.
 //
-// Any OTHER 403 is disabled as well, with no recovery window, because that is
-// what the request path does for every 403 (upstreamNodeFailure.ts): the node
-// refuses the call whether the key was revoked, the deployment was suspended
-// or the account lost access. Quota is the only 403 that heals on its own.
+// Any OTHER 403 that carries a body is disabled too, with no recovery window,
+// because that is what the request path does for every 403
+// (upstreamNodeFailure.ts): the node refuses the call whether the key was
+// revoked, the deployment was suspended or the account lost access. Quota is
+// the only 403 that heals on its own.
+//
+// A 403 with an EMPTY body is not evidence of anything and must not disable a
+// node. Every refusal we can classify — quota, revoked key, suspended app —
+// comes with a JSON body; an empty one is what the edge returns while an
+// instance restarts or while it is being republished. Observed for real: a node
+// was disabled permanently as `forbidden` on an empty 403, and by the time it
+// was looked at again it answered 403 with a full FREE_TIER_BUDGET_EXCEEDED
+// body — the right verdict was "quota, 31 days", not "forbidden, forever". It
+// is also a dead end: `check-disabled` only restores nodes that answer 200, so
+// nothing was ever going to undo the mistake. Ambiguous 403s are now retried
+// once and then merely cooled down, which costs one round trip and leaves the
+// node in the pool for the next request to judge.
 router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
   const settings = getSettings();
   const pool = settings.reverseProxyPool;
@@ -352,7 +365,20 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
   const annotated = [];
 
   for (const r of results) {
-    const body = (r.bodyText ?? "").trim();
+    let body = (r.bodyText ?? "").trim();
+    let status = r.status;
+    let online = r.online;
+    // Confirm an empty 403 before believing it: see the note above.
+    if (!online && status === 403 && !body) {
+      const retry = await probeNodeLlm(r.url, keyByUrl.get(r.url) ?? defaultKey);
+      if (retry.online) {
+        online = true;
+        status = retry.status;
+      } else {
+        body = (retry.bodyText ?? "").trim();
+        status = retry.status ?? status;
+      }
+    }
     // Reuse the request path's detector so a budget error is recognised the
     // same way regardless of which status code carried it.
     const budget = detectBudgetExceeded(body);
@@ -360,15 +386,16 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
     // Classify so the portal can explain every node instead of hiding the
     // remainder behind an "other" count.
     let kind: string;
-    if (r.online) kind = "ok";
+    if (online) kind = "ok";
     else if (budget) kind = "quota";
-    else if (r.status === 403) kind = "forbidden";
-    else if (r.status === 500 && body) kind = "server-error-with-body";
-    else if (r.status === 500) kind = "credential";
-    else if (r.status === undefined) kind = "unreachable";
+    else if (status === 403 && body) kind = "forbidden";
+    else if (status === 403) kind = "forbidden-unverified";
+    else if (status === 500 && body) kind = "server-error-with-body";
+    else if (status === 500) kind = "credential";
+    else if (status === undefined) kind = "unreachable";
     else kind = "error";
 
-    annotated.push({ ...r, bodyText: undefined, contentType: undefined, kind });
+    annotated.push({ ...r, status, online, bodyText: undefined, contentType: undefined, kind });
 
     // The pool may have changed while probing — only touch nodes still in it.
     if (!getSettings().reverseProxyPool.some((e) => e.url === r.url)) continue;
@@ -409,8 +436,7 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
       // node refuses the call and will keep refusing it, so it leaves the pool
       // with no recovery window. Only a quota 403 (matched above) is time-boxed.
       const upstreamReason = extractErrorCode(body) ?? "forbidden";
-      const lastError = extractErrorMessage(body)
-        ?? (body ? body.slice(0, 300) : "HTTP 403 with an empty response body");
+      const lastError = extractErrorMessage(body) ?? body.slice(0, 300);
       logger.warn(
         { nodeUrl: r.url, upstreamStatus: r.status, upstreamReason, message: lastError },
         "upstream node returned 403 in AI check — removing node from pool",
@@ -423,6 +449,15 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
         lastError,
       });
       disabled.push(r.url);
+    } else if (kind === "forbidden-unverified") {
+      // Two probes, both 403 with no body — no verdict, so no eviction.
+      logger.warn(
+        { nodeUrl: r.url, upstreamStatus: status },
+        "upstream node returned 403 with no body in AI check — cooling down without blocking",
+      );
+      setNodeCooldown(r.url);
+      rotateNodeToEnd(r.url);
+      cooled.push(r.url);
     } else if (kind === "server-error-with-body") {
       logger.warn(
         { nodeUrl: r.url, upstreamStatus: r.status, body: body.slice(0, 200) },
@@ -441,6 +476,7 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
     cooled: cooled.length,
     quota: annotated.filter((r) => r.kind === "quota").length,
     forbidden: annotated.filter((r) => r.kind === "forbidden").length,
+    forbiddenUnverified: annotated.filter((r) => r.kind === "forbidden-unverified").length,
     unreachable: annotated.filter((r) => r.kind === "unreachable").length,
     error: annotated.filter((r) => r.kind === "error").length,
   };
@@ -449,7 +485,16 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
 });
 // Send a real (1-token) LLM call through every disabled node and restore the
 // ones that answer. Dev nodes are skipped — they are always kept disabled.
-router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {  const settings = getSettings();
+//
+// It also repairs stale verdicts. Only `online` used to be acted on, so an
+// entry blocked for the wrong reason stayed wrong forever: a node disabled as
+// `forbidden` on an empty 403 (see check-ai) never returns 200 while its
+// account is out of budget, so nothing would ever relabel it `quota` and give
+// it the 31-day window it deserves. Every re-probe now refreshes the record:
+// `quota` gets the monthly time box, a body-bearing 403 gets its reason
+// rewritten, and only an unreadable answer leaves the entry untouched.
+router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {
+  const settings = getSettings();
   const urls = settings.disabledUpstreamNodes
     .filter((e) => e.type !== "replit-dev")
     .map((e) => e.url);
@@ -465,7 +510,49 @@ router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res)
   }
   restoreDisabledNodes(restored);
 
-  res.json({ results, restored });
+  const relabeled: Array<{ url: string; from?: string; to: string }> = [];
+  for (const r of results) {
+    if (r.online || !stillDisabled.has(r.url)) continue;
+    const body = (r.bodyText ?? "").trim();
+    const budget = detectBudgetExceeded(body);
+    const entry = getSettings().disabledUpstreamNodes.find((e) => e.url === r.url);
+    if (!entry) continue;
+
+    if (budget) {
+      // Out of quota: keep it out of the pool but on the monthly clock, so it
+      // comes back on its own instead of waiting for a manual re-enable.
+      const alreadyRight =
+        entry.upstreamReason === (budget.code) && entry.recoverAt !== undefined;
+      if (alreadyRight) continue;
+      logger.info(
+        { nodeUrl: r.url, from: entry.upstreamReason ?? null, to: budget.code },
+        "disabled node re-probed as budget-exhausted — relabelling with the monthly window",
+      );
+      disableUpstreamNode({
+        url: r.url,
+        disabledReason: "upstream-node-unavailable",
+        upstreamReason: budget.code,
+        upstreamStatus: r.status,
+        lastError: budget.message,
+        recoverAfterMs: FREE_TIER_RECOVERY_MS,
+      });
+      relabeled.push({ url: r.url, from: entry.upstreamReason, to: budget.code });
+    } else if (r.status === 403 && body) {
+      const reason = extractErrorCode(body) ?? "forbidden";
+      const lastError = extractErrorMessage(body) ?? body.slice(0, 300);
+      if (entry.upstreamReason === reason && entry.lastError === lastError) continue;
+      disableUpstreamNode({
+        url: r.url,
+        disabledReason: "upstream-node-unavailable",
+        upstreamReason: reason,
+        upstreamStatus: r.status,
+        lastError,
+      });
+      relabeled.push({ url: r.url, from: entry.upstreamReason, to: reason });
+    }
+  }
+
+  res.json({ results, restored, relabeled });
 });
 
 export default router;

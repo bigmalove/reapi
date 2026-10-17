@@ -133,7 +133,11 @@ export default function ConfigPage() {
   const [checkAiErr, setCheckAiErr] = useState("");
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [checkingDisabled, setCheckingDisabled] = useState(false);
-  const [checkDisabledResult, setCheckDisabledResult] = useState<{ results: NodeCheckResult[]; restored: string[] } | null>(null);
+  const [checkDisabledResult, setCheckDisabledResult] = useState<{
+    results: NodeCheckResult[];
+    restored: string[];
+    relabeled: Array<{ url: string; from?: string; to: string }>;
+  } | null>(null);
   const [checkDisabledErr, setCheckDisabledErr] = useState("");
 
   // Cooldowns state (nodeUrl → remaining ms)
@@ -560,7 +564,9 @@ export default function ConfigPage() {
     try {
       const result = await checkDisabledUpstreamNodes();
       setCheckDisabledResult(result);
-      if (result.restored.length > 0) await refreshAll();
+      // Relabelled entries changed their stored reason/recoverAt, so the panel
+      // above has to be re-read even when nothing was restored.
+      if (result.restored.length > 0 || result.relabeled.length > 0) await refreshAll();
     } catch (e) {
       setCheckDisabledErr(String(e));
     } finally {
@@ -1027,7 +1033,15 @@ export default function ConfigPage() {
               short: "403 拒绝已屏蔽",
               label: "403 拒绝访问 · 已屏蔽",
               tone: "text-rose-400",
-              hint: "节点直接拒绝调用（key 失效、部署被停或账号没权限），不会自己恢复。重新发布或修好权限后，点「检测并恢复」放回来。",
+              hint: "节点带着错误正文明确拒绝调用（key 失效、部署被停或账号没权限），不会自己恢复。重新发布或修好权限后，点「检测并恢复」放回来。",
+              detail: true,
+            },
+            {
+              key: "forbidden-unverified",
+              short: "403 无正文已冷却",
+              label: "403 无正文 · 已冷却（证据不足，未屏蔽）",
+              tone: "text-amber-400",
+              hint: "两次探测都是 403 但响应体为空。可识别的拒绝一定带 JSON 正文，空体更像边缘或实例重启中的临时回绝，所以只降队尾冷却 60 秒，不把这个节点拉黑。",
               detail: true,
             },
             {
@@ -1205,7 +1219,19 @@ export default function ConfigPage() {
                 <span className="text-muted-foreground">
                   仍不可用 {checkDisabledResult.results.filter((r) => !r.online).length}
                 </span>
+                {checkDisabledResult.relabeled.length > 0 && (
+                  <>
+                    ，
+                    <span className="text-amber-400">改判 {checkDisabledResult.relabeled.length} 个</span>
+                  </>
+                )}
               </div>
+              {checkDisabledResult.relabeled.map((r) => (
+                <div key={r.url} className="text-[11px] text-amber-400/90 break-all">
+                  <span className="font-mono">{r.url}</span> — {r.from ?? "未知"} → {r.to}
+                  {r.to === "FREE_TIER_BUDGET_EXCEEDED" && "（按月度周期 31 天后自动回池）"}
+                </div>
+              ))}
               {checkDisabledResult.results
                 .filter((r) => !r.online)
                 .map((r) => (
