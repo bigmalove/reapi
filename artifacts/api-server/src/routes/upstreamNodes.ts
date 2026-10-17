@@ -6,6 +6,8 @@ import {
   restoreDisabledNodes,
   REPLIT_HOSTING_SHUTDOWN,
   NODE_PROBE_OFFLINE,
+  NODE_SERVER_ERROR,
+  SERVER_ERROR_RECOVERY_MS,
   type DisabledUpstreamNode,
   type UpstreamNodeType,
 } from "../lib/settings.js";
@@ -306,10 +308,60 @@ router.post("/api/upstream-nodes/check", requireAuth, async (_req, res) => {
   res.json({ results, disabled });
 });
 
+// Send a real (1-token) LLM call through every node in the active pool and
+// disable the ones that answer HTTP 500.
+//
+// This is the companion to /check: that one probes whether a process is
+// answering at all (a plain GET /healthz, no model quota), which cannot see a
+// node whose Replit AI Integration stopped minting credentials. Such a node
+// serves its homepage, /api/healthz and /api/setup-status normally — every
+// provider still reports `configured: true` — yet every /modelfarm call comes
+// back as HTTP 500 with an empty body, and only republishing the deployment
+// fixes it. Since the pool is consumed through sticky pool[0], a node like that
+// at the head breaks every request, and left in the pool it keeps coming back.
+//
+// Only 500 disables a node here. Other failures (quota, timeouts, transient
+// provider errors) leave it in place: they are either not node-local or already
+// handled by the cooldown path.
+router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
+  const settings = getSettings();
+  const urls = settings.reverseProxyPool.map((e) => e.url);
+  // Nodes in the pool inherit pool[0]'s key when their own is blank.
+  const apiKey = settings.reverseProxyPool[0]?.apiKey ?? "";
+
+  const results = await probeNodes(urls, (url) => probeNodeLlm(url, apiKey));
+
+  const disabled: string[] = [];
+  for (const r of results) {
+    if (r.online || r.status !== 500) continue;
+    // The pool may have changed while probing — only touch nodes still in it.
+    if (!getSettings().reverseProxyPool.some((e) => e.url === r.url)) continue;
+    logger.warn(
+      { nodeUrl: r.url, upstreamStatus: r.status, message: r.error },
+      "upstream node returned 500 in AI check — removing node from pool",
+    );
+    // probeNodeLlm formats its error as `HTTP <status>: <body>`; a credential
+    // failure comes back with an empty body, which would render as a bare
+    // "HTTP 500: " in the portal. Say what it actually means instead.
+    const lastError = (r.error ?? "").replace(/^HTTP 500:\s*$/, "").trim()
+      || "HTTP 500 with an empty response body — the node cannot obtain an AI credential; republish the Repl to fix it";
+    disableUpstreamNode({
+      url: r.url,
+      disabledReason: "upstream-node-unavailable",
+      upstreamReason: NODE_SERVER_ERROR,
+      upstreamStatus: r.status,
+      lastError,
+      recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
+    });
+    disabled.push(r.url);
+  }
+
+  res.json({ results, disabled });
+});
+
 // Send a real (1-token) LLM call through every disabled node and restore the
 // ones that answer. Dev nodes are skipped — they are always kept disabled.
-router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {
-  const settings = getSettings();
+router.post("/api/upstream-nodes/check-disabled", requireAuth, async (_req, res) => {  const settings = getSettings();
   const urls = settings.disabledUpstreamNodes
     .filter((e) => e.type !== "replit-dev")
     .map((e) => e.url);

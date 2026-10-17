@@ -338,6 +338,20 @@ export async function checkUpstreamNodes(): Promise<{ results: NodeCheckResult[]
   return res.json();
 }
 
+/**
+ * Send a 1-token LLM call through every pool node; nodes answering HTTP 500
+ * are disabled server-side (their AI credential cannot be issued until the
+ * deployment is republished).
+ */
+export async function checkUpstreamNodesAi(): Promise<{ results: NodeCheckResult[]; disabled: string[] }> {
+  const res = await fetch(`${API_BASE}/upstream-nodes/check-ai`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
 /** Send a 1-token LLM call through every disabled node; passing ones are restored server-side. */
 export async function checkDisabledUpstreamNodes(): Promise<{ results: NodeCheckResult[]; restored: string[] }> {
   const res = await fetch(`${API_BASE}/upstream-nodes/check-disabled`, {

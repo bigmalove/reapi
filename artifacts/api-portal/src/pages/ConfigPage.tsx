@@ -7,6 +7,7 @@ import {
   fetchUpstreamNodesFrom,
   fetchCooldowns,
   checkUpstreamNodes,
+  checkUpstreamNodesAi,
   checkDisabledUpstreamNodes,
   verifyKey,
   setClientKey,
@@ -121,6 +122,9 @@ export default function ConfigPage() {
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<{ results: NodeCheckResult[]; disabled: string[] } | null>(null);
   const [checkErr, setCheckErr] = useState("");
+  const [checkingAi, setCheckingAi] = useState(false);
+  const [checkAiResult, setCheckAiResult] = useState<{ results: NodeCheckResult[]; disabled: string[] } | null>(null);
+  const [checkAiErr, setCheckAiErr] = useState("");
   const [checkingDisabled, setCheckingDisabled] = useState(false);
   const [checkDisabledResult, setCheckDisabledResult] = useState<{ results: NodeCheckResult[]; restored: string[] } | null>(null);
   const [checkDisabledErr, setCheckDisabledErr] = useState("");
@@ -476,6 +480,24 @@ export default function ConfigPage() {
     }
   }
 
+  // A 1-token real call per node: the only way to see a node that is up but
+  // cannot obtain an AI credential (HTTP 500 with an empty body). Those are
+  // disabled server-side, same as /check does for offline nodes.
+  async function handleCheckNodesAi() {
+    setCheckingAi(true);
+    setCheckAiErr("");
+    setCheckAiResult(null);
+    try {
+      const result = await checkUpstreamNodesAi();
+      setCheckAiResult(result);
+      if (result.disabled.length > 0) await refreshAll();
+    } catch (e) {
+      setCheckAiErr(String(e));
+    } finally {
+      setCheckingAi(false);
+    }
+  }
+
   async function copyFromMaster() {
     setCopyFromErr("");
     setCopyFromOk(null);
@@ -796,6 +818,16 @@ export default function ConfigPage() {
             {checking ? "检测中..." : "检测节点状态"}
           </button>
 
+          <button
+            type="button"
+            onClick={handleCheckNodesAi}
+            disabled={checkingAi || (settings?.reverseProxyPool.length ?? 0) === 0}
+            title="对代理池中每个节点发一条 1 token 的真实请求；返回 500 的节点会被自动屏蔽（这类节点进程还活着，但拿不到 AI 凭证，需要重新发布才能恢复）"
+            className="rounded-md border border-border bg-secondary/30 px-3 py-1.5 text-xs text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-50"
+          >
+            {checkingAi ? "检测中..." : "检测 AI 可用性"}
+          </button>
+
           {/* Export */}
           <button
             type="button"
@@ -849,6 +881,32 @@ export default function ConfigPage() {
                   <span className="font-mono text-foreground">{r.url}</span> — {r.error}
                 </div>
               ))}
+          </div>
+        )}
+
+        {checkAiErr && <p className="text-xs text-destructive">AI 可用性检测失败：{checkAiErr}</p>}
+        {checkAiResult && (
+          <div className="rounded-md border border-border bg-secondary/10 p-3 text-xs space-y-1">
+            <div>
+              已用 1 token 实测 {checkAiResult.results.length} 个节点：
+              <span className="text-green-400">
+                可调用 {checkAiResult.results.filter((r) => r.online).length}
+              </span>
+              <span className="text-muted-foreground"> / </span>
+              <span className={checkAiResult.disabled.length > 0 ? "text-rose-400" : "text-muted-foreground"}>
+                返回 500 并已屏蔽 {checkAiResult.disabled.length}
+              </span>
+            </div>
+            {checkAiResult.disabled.length > 0 && (
+              <p className="text-[11px] text-muted-foreground">
+                这类节点进程仍在运行，但拿不到 AI 凭证（HTTP 500 空响应），需要重新发布该 Repl 才能恢复；6 小时后会自动放回池子重试。
+              </p>
+            )}
+            {checkAiResult.disabled.map((url) => (
+              <div key={url} className="text-[11px] text-muted-foreground break-all">
+                <span className="font-mono text-foreground">{url}</span>
+              </div>
+            ))}
           </div>
         )}
 
