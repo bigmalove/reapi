@@ -9,6 +9,8 @@ import type {
 } from "../types.js";
 import {
   budgetToEffort,
+  clampIdentifier,
+  clampIdentityFields,
   effortToBudget,
   sanitizeBetaList,
   splitThinkingSuffix,
@@ -321,6 +323,10 @@ export function buildNativeAnthropicBody(
     delete out["thinking"];
   }
 
+  // Claude Code's `metadata.user_id` is longer than the 32-byte
+  // `safety_identifier` some relays enforce; clamp before it leaves the gateway.
+  clampIdentityFields(out);
+
   return out;
 }
 
@@ -502,7 +508,9 @@ export function anthropicToOpenAIRequest(
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
     request.stop = body.stop_sequences;
   }
-  if (typeof body.metadata?.["user_id"] === "string") request.user = body.metadata["user_id"];
+  if (typeof body.metadata?.["user_id"] === "string") {
+    request.user = clampIdentifier(body.metadata["user_id"]);
+  }
 
   if (Array.isArray(body.tools)) {
     const tools: Tool[] = body.tools

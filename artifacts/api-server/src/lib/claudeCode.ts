@@ -341,6 +341,65 @@ export function routeClaudeCodeModel(
   return { model: resolution.model, match: resolution.match, disabled };
 }
 
+// ── Identity fields ─────────────────────────────────────────────────────────
+
+/**
+ * Longest `safety_identifier` an OpenAI-compatible upstream accepts. OpenAI's
+ * own limit is 64 characters, but the relays this gateway talks to (Replit's
+ * modelfarm, some Azure front doors) enforce 32 **bytes** and reject the whole
+ * request when the value is longer:
+ *
+ *   `400 safety_identifier is too long. Maximum length: 32 bytes.`
+ *
+ * Claude Code sends `metadata.user_id` on every request as `user_` + a long
+ * hash, and a relay that translates Anthropic → OpenAI maps it onto
+ * `safety_identifier`, so the request dies before the model is ever called.
+ */
+export const MAX_SAFETY_IDENTIFIER_BYTES = 32;
+
+/**
+ * Clamp an identifier to a byte budget without splitting a multi-byte
+ * character. The value is only used for upstream abuse grouping, so a truncated
+ * id is harmless — and because Claude Code's ids are `user_<hash>`, the first
+ * 32 bytes stay unique in practice.
+ */
+export function clampIdentifier(value: string, maxBytes = MAX_SAFETY_IDENTIFIER_BYTES): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let out = "";
+  let bytes = 0;
+  for (const char of value) {
+    const size = Buffer.byteLength(char, "utf8");
+    if (bytes + size > maxBytes) break;
+    out += char;
+    bytes += size;
+  }
+  return out;
+}
+
+/**
+ * Apply the identifier budget to the fields that can reach an OpenAI-shaped
+ * upstream: `safety_identifier` (OpenAI), `user` (OpenAI legacy) and
+ * `metadata.user_id` (Anthropic). Mutates and returns the same object so it can
+ * be called inline while building a body.
+ */
+export function clampIdentityFields<T extends Record<string, unknown>>(body: T): T {
+  const record = body as Record<string, unknown>;
+  if (typeof record["safety_identifier"] === "string") {
+    record["safety_identifier"] = clampIdentifier(record["safety_identifier"] as string);
+  }
+  if (typeof record["user"] === "string") {
+    record["user"] = clampIdentifier(record["user"] as string);
+  }
+  const metadata = record["metadata"];
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    const meta = metadata as Record<string, unknown>;
+    if (typeof meta["user_id"] === "string") {
+      meta["user_id"] = clampIdentifier(meta["user_id"] as string);
+    }
+  }
+  return body;
+}
+
 // ── Model observations ──────────────────────────────────────────────────────
 
 export interface ClaudeModelObservation {

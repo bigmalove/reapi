@@ -265,6 +265,17 @@ so only the first request after a restart pays the extra round trip. Fields in
 `CORE_NATIVE_FIELDS` (`model`, `messages`, `system`, `max_tokens`, `stream`) are
 never dropped — an error naming one of those is relayed to the client.
 
+**Identity metadata is clamped to 32 bytes.** Claude Code sends
+`metadata.user_id` (`user_` + a long hash) on every request, and a relay that
+translates Anthropic → OpenAI maps it onto `safety_identifier`, which some
+upstreams cap at 32 **bytes** — the request then dies with
+`400 safety_identifier is too long. Maximum length: 32 bytes.` before the model
+is called. `clampIdentifier()` (byte-safe, never splits a multi-byte character)
+truncates `metadata.user_id`, `user` and `safety_identifier` on every outbound
+path (native Anthropic body, converted request, OpenAI/OpenRouter bodies). If an
+upstream still rejects it, the native path drops `metadata` entirely and retries
+once — the value only groups requests for abuse monitoring.
+
 **count_tokens.** Proxied to `<anthropic baseUrl>/v1/messages/count_tokens` when
 the model is served by Anthropic (8s timeout). Any other provider — or an
 upstream without that route — gets a local estimate (`estimateAnthropicInputTokens`:

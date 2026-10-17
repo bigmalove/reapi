@@ -2,6 +2,7 @@ import { logger } from "../lib/logger.js";
 import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
+import { clampIdentifier } from "../lib/claudeCode.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -378,6 +379,11 @@ export async function callAnthropic(
   }
   if (extra.user && typeof extra.user === "string") {
     metadata = { ...(metadata ?? {}), user_id: extra.user };
+  }
+  // A relay in front of Anthropic may map user_id onto OpenAI's
+  // safety_identifier, which is capped at 32 bytes upstream.
+  if (metadata && typeof metadata["user_id"] === "string") {
+    metadata = { ...metadata, user_id: clampIdentifier(metadata["user_id"] as string) };
   }
 
   const body: Record<string, unknown> = {

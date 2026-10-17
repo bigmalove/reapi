@@ -2,6 +2,7 @@ import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from 
 import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
+import { clampIdentityFields } from "../lib/claudeCode.js";
 
 // Models that behave like reasoning models (use max_completion_tokens, no temperature/top_p)
 const REASONING_MODELS = new Set(["gpt-5.5"]);
@@ -84,6 +85,9 @@ export async function callOpenAI(
         }),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   };
+  // Some relays cap `safety_identifier` at 32 bytes and reject the whole
+  // request otherwise; see clampIdentityFields().
+  clampIdentityFields(resolvedRequest);
   const body = JSON.stringify(resolvedRequest);
 
   const outboundHeaders: Record<string, string> = {

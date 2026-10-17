@@ -2,6 +2,7 @@ import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from 
 import { resolveProviderEndpoint, type ProviderEndpoint } from "../lib/providerEndpoint.js";
 import { handleEmptyUpstreamStream, maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
+import { clampIdentityFields } from "../lib/claudeCode.js";
 import { logger } from "../lib/logger.js";
 import {
   planSyntheticStreamShim,
@@ -289,6 +290,8 @@ export async function callOpenRouter(
       ? planSyntheticStreamShim(body)
       : null;
   const outboundBody = shim ? shim.body : body;
+  // Keep identity fields inside the 32-byte cap some upstreams enforce.
+  clampIdentityFields(outboundBody as Record<string, unknown>);
 
   const outboundHeaders: Record<string, string> = {
     "Content-Type": "application/json",

@@ -381,6 +381,24 @@ async function forwardNativeOnce(args: {
       continue;
     }
 
+    // `safety_identifier is too long. Maximum length: 32 bytes.` A relay ahead
+    // of Anthropic maps `metadata.user_id` onto OpenAI's safety_identifier; the
+    // gateway already clamps it to 32 bytes, so a remaining rejection means
+    // this upstream wants it shorter still (or rejects the field outright).
+    // Identity metadata is only used for abuse grouping — drop it and retry.
+    const identifierTooLong =
+      response.status === 400 &&
+      /safety_identifier|(?:user_?id).{0,40}too long|too long.{0,40}(?:user_?id)/i.test(text);
+    if (identifierTooLong && ("metadata" in outbound || "safety_identifier" in outbound) && round < MAX_STRIP_ROUNDS) {
+      delete outbound["metadata"];
+      delete outbound["safety_identifier"];
+      logger.warn(
+        { url, round: round + 1 },
+        "upstream rejected the identity metadata — dropping it and retrying",
+      );
+      continue;
+    }
+
     failure = { status: response.status, text };
     break;
   }
