@@ -2,11 +2,14 @@ import { Router } from "express";
 import {
   getSettings,
   updateSettings,
+  normalizeClaudeCodeModelMap,
+  MAX_CLAUDE_CODE_MODEL_MAP,
   type ServerSettings,
   type ProviderName,
   type ProviderOverrides,
   type PoolEntry,
   type ReverseProxyMode,
+  type ClaudeCodeModelMap,
 } from "../lib/settings.js";
 import { requireAuth } from "../lib/auth.js";
 
@@ -38,6 +41,7 @@ interface PublicDisabledNode {
 interface PublicSettings {
   sillyTavernMode: boolean;
   syntheticStreamShim: boolean;
+  claudeCodeModelMap: ClaudeCodeModelMap;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PublicPoolEntry[];
@@ -56,6 +60,7 @@ function toPublic(s: ServerSettings): PublicSettings {
   return {
     sillyTavernMode: s.sillyTavernMode,
     syntheticStreamShim: s.syntheticStreamShim,
+    claudeCodeModelMap: { ...s.claudeCodeModelMap },
     reverseProxyEnabled: s.reverseProxyEnabled,
     reverseProxyMode: s.reverseProxyMode,
     reverseProxyPool: s.reverseProxyPool.map((e) => ({ url: e.url, apiKeySet: !!e.apiKey })),
@@ -96,6 +101,7 @@ router.post("/api/settings", requireAuth, (req, res) => {
   const body = (req.body ?? {}) as {
     sillyTavernMode?: boolean;
     syntheticStreamShim?: boolean;
+    claudeCodeModelMap?: unknown;
     reverseProxyEnabled?: boolean;
     reverseProxyMode?: ReverseProxyMode;
     reverseProxyPool?: Array<{ url?: string; apiKey?: string | null }>;
@@ -114,6 +120,31 @@ router.post("/api/settings", requireAuth, (req, res) => {
   }
   if (typeof body.syntheticStreamShim === "boolean") {
     patch.syntheticStreamShim = body.syntheticStreamShim;
+  }
+  // Whole-map replacement: sending `{}` clears every alias. Validation is
+  // intentionally lenient (trim + cap), so a partially filled editor row is
+  // simply skipped rather than failing the save.
+  if (body.claudeCodeModelMap !== undefined) {
+    if (
+      body.claudeCodeModelMap === null ||
+      typeof body.claudeCodeModelMap !== "object" ||
+      Array.isArray(body.claudeCodeModelMap)
+    ) {
+      res.status(400).json({
+        error: { message: "claudeCodeModelMap must be an object of {modelId: modelId}", type: "validation_error" },
+      });
+      return;
+    }
+    if (Object.keys(body.claudeCodeModelMap as object).length > MAX_CLAUDE_CODE_MODEL_MAP) {
+      res.status(400).json({
+        error: {
+          message: `claudeCodeModelMap supports at most ${MAX_CLAUDE_CODE_MODEL_MAP} entries`,
+          type: "validation_error",
+        },
+      });
+      return;
+    }
+    patch.claudeCodeModelMap = normalizeClaudeCodeModelMap(body.claudeCodeModelMap);
   }
   if (typeof body.reverseProxyEnabled === "boolean") {
     patch.reverseProxyEnabled = body.reverseProxyEnabled;

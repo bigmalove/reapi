@@ -201,6 +201,9 @@ claude`}
             Bedrock/Vertex 前缀与已下线版本（自动映射到同家族最新模型）。也可以用网关里的任意模型 id
             （如 <code className="bg-secondary/60 px-1 rounded">gpt-5.5</code>、
             <code className="bg-secondary/60 px-1 rounded">gemini-3.1-pro-preview</code>），网关会自动转换协议。
+            若客户端用的是网关里没有的名字（如 <code className="bg-secondary/60 px-1 rounded">claude-haiku-5-5</code>），
+            到「配置 → Claude Code 模型映射」里固定它要用的模型；填{" "}
+            <code className="bg-secondary/60 px-1 rounded">*</code> 可设兜底模型。
           </p>
         </div>
       </section>
@@ -256,6 +259,7 @@ for chunk in stream:
                 ["POST", "/v1/chat/completions", "对话补全(核心接口)"],
                 ["POST", "/v1/messages", "Anthropic Messages 协议（Claude Code 入口）"],
                 ["POST", "/v1/messages/count_tokens", "Anthropic token 计数（上游代理或本地估算）"],
+                ["GET", "/v1/admin/claude-code/models", "Claude Code 最近发送的模型名及其实际路由"],
                 ["GET", "/v1/admin/models", "列出全部模型及其状态"],
                 ["PATCH", "/v1/admin/models", "启用/禁用模型"],
                 ["GET", "/v1/admin/openrouter/models", "远程拉取 OpenRouter 最新模型目录"],

@@ -1,6 +1,7 @@
 import { Router, type Request, type Response as ExpressResponse } from "express";
-import { extractProvidedKey, getProxyKey } from "../../lib/auth.js";
+import { extractProvidedKey, getProxyKey, requireAuth } from "../../lib/auth.js";
 import { getDefaultModel, isModelDisabled, resolveProvider } from "../../lib/models.js";
+import { getSettings } from "../../lib/settings.js";
 import { resolveProviderEndpoint } from "../../lib/providerEndpoint.js";
 import {
   MAX_ATTEMPTS,
@@ -12,7 +13,12 @@ import {
   handleEmptyUpstreamStream,
   maybeDisableSelectedNode,
 } from "../../lib/upstreamNodeFailure.js";
-import { resolveClaudeCodeModel, sanitizeAnthropicBeta } from "../../lib/claudeCode.js";
+import {
+  getModelObservations,
+  recordModelObservation,
+  routeClaudeCodeModel,
+  sanitizeAnthropicBeta,
+} from "../../lib/claudeCode.js";
 import {
   anthropicError,
   anthropicMessageFromOpenAI,
@@ -564,11 +570,27 @@ router.post("/v1/messages", anthropicAuth, async (req: Request, res: ExpressResp
 
   const requestedModel =
     typeof body.model === "string" && body.model.length > 0 ? body.model : getDefaultModel();
-  const resolution = resolveClaudeCodeModel(requestedModel);
-  const model = resolution.model;
+  const isUsable = (id: string) => !isModelDisabled(id);
+  const route = routeClaudeCodeModel(requestedModel, getSettings().claudeCodeModelMap, isUsable);
+  const model = route.model;
+  const modelDisabled = route.disabled;
+  recordModelObservation(requestedModel, model, route.match, modelDisabled);
 
-  if (isModelDisabled(model)) {
-    res.status(400).json(anthropicError("invalid_request_error", `model ${requestedModel} is disabled`));
+  if (modelDisabled) {
+    // Say which model actually failed and how to fix it: the client only knows
+    // the id it sent, which may be an alias that maps elsewhere.
+    const hint =
+      route.match === "mapped"
+        ? ` Check 配置 → Claude Code 模型映射.`
+        : ` Enable it in 模型管理, or add a mapping (or a "*" fallback) in 配置 → Claude Code 模型映射.`;
+    res.status(400).json(
+      anthropicError(
+        "invalid_request_error",
+        route.match === "mapped"
+          ? `model ${requestedModel} is mapped to ${model}, which is disabled.${hint}`
+          : `model ${requestedModel} resolves to ${model}, which is disabled.${hint}`,
+      ),
+    );
     return;
   }
 
@@ -589,7 +611,7 @@ router.post("/v1/messages", anthropicAuth, async (req: Request, res: ExpressResp
     {
       requestedModel,
       model,
-      match: resolution.match,
+      match: route.match,
       provider,
       stream,
       messages: body.messages.length,
@@ -617,6 +639,21 @@ router.post("/v1/messages", anthropicAuth, async (req: Request, res: ExpressResp
   }
 });
 
+/**
+ * Model ids Claude Code has actually sent, with where they were routed. The
+ * portal uses this to offer one-click mappings for unknown or falling-back ids.
+ * In-memory only: it is a debugging aid, not state worth persisting.
+ */
+router.get("/v1/admin/claude-code/models", requireAuth, (_req: Request, res: ExpressResponse) => {
+  const map = getSettings().claudeCodeModelMap;
+  const data = getModelObservations().map((entry) => ({
+    ...entry,
+    mapped: Object.prototype.hasOwnProperty.call(map, entry.requested),
+    target: map[entry.requested] ?? null,
+  }));
+  res.json({ object: "list", count: data.length, data });
+});
+
 router.post("/v1/messages/count_tokens", anthropicAuth, async (req: Request, res: ExpressResponse) => {
   const body = req.body as AnthropicMessagesBody;
   if (!body || typeof body !== "object" || !Array.isArray(body.messages)) {
@@ -626,7 +663,11 @@ router.post("/v1/messages/count_tokens", anthropicAuth, async (req: Request, res
 
   const requestedModel =
     typeof body.model === "string" && body.model.length > 0 ? body.model : getDefaultModel();
-  const { model } = resolveClaudeCodeModel(requestedModel);
+  const { model } = routeClaudeCodeModel(
+    requestedModel,
+    getSettings().claudeCodeModelMap,
+    (id) => !isModelDisabled(id),
+  );
   const estimate = estimateAnthropicInputTokens(body);
 
   // Claude Code uses this endpoint for context accounting. Proxy the real

@@ -1,4 +1,4 @@
-import { getModelRegistry, isThinkingVariantId } from "./models.js";
+import { getModelRegistry, isThinkingVariantId, resolveProvider } from "./models.js";
 
 /**
  * Claude Code compatibility helpers.
@@ -22,7 +22,15 @@ import { getModelRegistry, isThinkingVariantId } from "./models.js";
  * "OAuth authentication is currently not supported".
  */
 
-export type ClaudeModelMatch = "exact" | "normalized" | "canonical" | "family" | "unmapped";
+export type ClaudeModelMatch =
+  | "exact"
+  | "mapped"
+  /** Wildcard `*` fallback: the id was unknown or resolved to a disabled model. */
+  | "fallback"
+  | "normalized"
+  | "canonical"
+  | "family"
+  | "unmapped";
 
 export interface ClaudeModelResolution {
   /** Model id as sent by the client. */
@@ -81,25 +89,39 @@ function canonicalKey(id: string): string {
 /**
  * Map a Claude Code model id onto a registry id.
  *
- * Resolution order: exact → whitespace/Bedrock normalised → canonical
- * (`4.5` == `4-5`, dates dropped) → serving-mode marker stripped
- * (`-fast`/`-1m`/`-latest`) → family fallback (newest `claude-<family>-*`).
+ * Resolution order: operator mapping → exact → whitespace/Bedrock normalised →
+ * canonical (`4.5` == `4-5`, dates dropped) → serving-mode marker stripped
+ * (`-fast`/`-1m`/`-latest`) → family fallback (newest enabled
+ * `claude-<family>-*`).
+ *
+ * The operator mapping (`settings.claudeCodeModelMap`) is consulted first so an
+ * explicit choice always wins over the heuristics — that is what lets a client
+ * id such as `claude-haiku-5-5` be pinned to whichever model the operator wants
+ * (including a model from another provider) without reconfiguring the client.
+ *
  * The family fallback is what keeps retired ids such as
  * `claude-3-5-haiku-20241022` working: the exact version is gone from the
- * registry, so the request lands on the newest model of that family.
+ * registry, so the request lands on the newest model of that family — preferring
+ * an enabled one, so a disabled sibling does not fail the request.
  */
-export function resolveClaudeCodeModel(requested: string): ClaudeModelResolution {
+export function resolveClaudeCodeModel(
+  requested: string,
+  options: { map?: Record<string, string>; isUsable?: (id: string) => boolean } = {},
+): ClaudeModelResolution {
   const trimmed = requested.trim();
   if (!trimmed) return { requested, model: requested, match: "unmapped" };
+
+  const mapped = lookupMappedModel(options.map, trimmed);
+  if (mapped) return { requested, model: mapped, match: "mapped" };
 
   // Thinking variants resolve through their base id, then re-attach the marker.
   const thinking = THINKING_SUFFIX_RE.exec(trimmed);
   if (thinking) {
-    const baseRes = resolveClaudeCodeModel(trimmed.slice(0, -thinking[0].length));
+    const baseRes = resolveClaudeCodeModel(trimmed.slice(0, -thinking[0].length), options);
     if (baseRes.match !== "unmapped") {
       return {
         requested,
-        model: `${baseRes.model}${thinking[0]}`,
+        model: reattachThinkingSuffix(baseRes.model, thinking[0]),
         match: baseRes.match,
       };
     }
@@ -132,13 +154,59 @@ export function resolveClaudeCodeModel(requested: string): ClaudeModelResolution
 
   const family = target.match(/(?:^|-)(opus|sonnet|haiku)(?:-|$)/)?.[1];
   if (family && (target.startsWith("claude-") || target.startsWith("anthropic-claude-"))) {
-    const newest = bases
+    // Newest first; prefer an enabled model so one disabled entry does not turn
+    // every request for a retired id into a 400.
+    const candidates = bases
       .filter((m) => m.provider === "anthropic" && canonicalKey(m.id).startsWith(`claude-${family}-`))
-      .sort((a, b) => b.created - a.created)[0];
-    if (newest) return { requested, model: newest.id, match: "family" };
+      .sort((a, b) => b.created - a.created);
+    const preferred =
+      (options.isUsable ? candidates.find((m) => options.isUsable!(m.id)) : undefined) ?? candidates[0];
+    if (preferred) return { requested, model: preferred.id, match: "family" };
   }
 
   return { requested, model: cleaned || trimmed, match: "unmapped" };
+}
+
+/**
+ * `claude-haiku-4-5` + `-thinking-high` → `claude-haiku-4-5-thinking-high`, but
+ * only when that variant exists. A mapped target from another provider (or a
+ * base id without variants) is returned unchanged: the providers parse the
+ * suffix themselves and an unregistered id would 404 at routing time.
+ */
+function reattachThinkingSuffix(target: string, suffix: string): string {
+  if (THINKING_SUFFIX_RE.test(target)) return target;
+  const candidate = `${target}${suffix}`;
+  return getModelRegistry().some((m) => m.id === candidate) ? candidate : target;
+}
+
+/**
+ * Look an id up in the operator mapping. Matching is deliberately forgiving so
+ * one row covers the variants a client sends: exact, case-insensitive, and
+ * date / version / serving-marker insensitive (`claude-sonnet-4-5` also covers
+ * `claude-sonnet-4-5-20250929[1m]`).
+ */
+function lookupMappedModel(
+  map: Record<string, string> | undefined,
+  requested: string,
+): string | null {
+  if (!map) return null;
+  const direct = map[requested];
+  if (typeof direct === "string" && direct) return direct;
+
+  const lower = requested.toLowerCase();
+  const target = canonicalKey(requested);
+  const targetBase = target.replace(/-(?:fast|1m|latest|\d+m)$/, "");
+
+  let looseMatch: string | null = null;
+  for (const [key, value] of Object.entries(map)) {
+    if (typeof value !== "string" || !value) continue;
+    const lowerKey = key.trim().toLowerCase();
+    if (lowerKey === lower) return value;
+    const keyCanonical = canonicalKey(key);
+    if (keyCanonical === target) return value;
+    if (keyCanonical.replace(/-(?:fast|1m|latest|\d+m)$/, "") === targetBase) looseMatch = value;
+  }
+  return looseMatch;
 }
 
 /**
@@ -186,6 +254,108 @@ export function sanitizeBetaList(value: unknown): string[] | undefined {
   const raw = value.filter((entry): entry is string => typeof entry === "string");
   const sanitized = sanitizeAnthropicBeta(raw.join(","));
   return sanitized ? sanitized.split(",") : undefined;
+}
+
+/**
+ * Resolve a Claude Code model id to the model that will actually serve it,
+ * applying the operator mapping, the automatic heuristics, and the wildcard
+ * `*` fallback.
+ *
+ * The wildcard row (`{"*": "<model>"}`) is what keeps Claude Code usable when
+ * the model it asks for is disabled or unknown — a background agent asking for
+ * `claude-haiku-5-5` on a gateway where every Claude model is disabled would
+ * otherwise fail every request. It only kicks in when the normal resolution
+ * cannot produce a usable model, so explicit mappings and exact ids win.
+ */
+export function routeClaudeCodeModel(
+  requested: string,
+  map: Record<string, string> = {},
+  isUsable: (id: string) => boolean = () => true,
+): { model: string; match: ClaudeModelMatch; disabled: boolean } {
+  const resolution = resolveClaudeCodeModel(requested, { map, isUsable });
+  const disabled = !isUsable(resolution.model);
+
+  const fallback = (map["*"] ?? "").trim();
+  if (
+    fallback &&
+    fallback !== resolution.model &&
+    (resolution.match === "unmapped" || disabled) &&
+    isUsable(fallback) &&
+    resolveProvider(fallback)
+  ) {
+    return { model: fallback, match: "fallback", disabled: false };
+  }
+
+  return { model: resolution.model, match: resolution.match, disabled };
+}
+
+// ── Model observations ──────────────────────────────────────────────────────
+
+export interface ClaudeModelObservation {
+  /** Model id as the client sent it. */
+  requested: string;
+  /** Gateway model id it was routed to. */
+  resolved: string;
+  match: ClaudeModelMatch;
+  /** True when the resolved model is currently disabled (requests fail). */
+  resolvedDisabled: boolean;
+  count: number;
+  /** ISO timestamp of the most recent request. */
+  lastSeen: string;
+}
+
+const MAX_OBSERVATIONS = 50;
+const observations = new Map<string, ClaudeModelObservation>();
+
+/**
+ * Record which model ids Claude Code actually sends, so the portal can offer
+ * one-click mappings for the ones that are not in the registry yet instead of
+ * making the operator dig through logs.
+ */
+export function recordModelObservation(
+  requested: string,
+  resolved: string,
+  match: ClaudeModelMatch,
+  resolvedDisabled: boolean,
+  now: number = Date.now(),
+): void {
+  const key = requested.trim().toLowerCase();
+  if (!key) return;
+  const existing = observations.get(key);
+  if (existing) {
+    existing.resolved = resolved;
+    existing.match = match;
+    existing.resolvedDisabled = resolvedDisabled;
+    existing.count++;
+    existing.lastSeen = new Date(now).toISOString();
+    return;
+  }
+  if (observations.size >= MAX_OBSERVATIONS) {
+    // Evict the least recently seen id.
+    let oldestKey: string | null = null;
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const [k, v] of observations) {
+      const seen = Date.parse(v.lastSeen);
+      if (seen < oldest) {
+        oldest = seen;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey) observations.delete(oldestKey);
+  }
+  observations.set(key, {
+    requested: requested.trim(),
+    resolved,
+    match,
+    resolvedDisabled,
+    count: 1,
+    lastSeen: new Date(now).toISOString(),
+  });
+}
+
+/** Most recently seen model ids first. */
+export function getModelObservations(): ClaudeModelObservation[] {
+  return Array.from(observations.values()).sort((a, b) => Date.parse(b.lastSeen) - Date.parse(a.lastSeen));
 }
 
 /**

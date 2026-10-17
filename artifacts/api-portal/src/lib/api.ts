@@ -46,6 +46,8 @@ export interface DisabledUpstreamNode {
 export interface Settings {
   sillyTavernMode: boolean;
   syntheticStreamShim: boolean;
+  /** Claude Code client model id → gateway model id. */
+  claudeCodeModelMap: Record<string, string>;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PublicPoolEntry[];
@@ -68,6 +70,8 @@ export interface PoolEntryPatch {
 export interface SettingsPatch {
   sillyTavernMode?: boolean;
   syntheticStreamShim?: boolean;
+  /** Whole-map replacement; `{}` clears every alias. */
+  claudeCodeModelMap?: Record<string, string>;
   reverseProxyEnabled?: boolean;
   reverseProxyMode?: ReverseProxyMode;
   reverseProxyPool?: PoolEntryPatch[];
@@ -240,6 +244,34 @@ export async function updateSettings(patch: SettingsPatch): Promise<Settings> {
 
 export async function fetchAdminModels(): Promise<ModelsResponse> {
   const res = await fetch(`${V1_BASE}/admin/models`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export type ClaudeModelMatch = "exact" | "mapped" | "normalized" | "canonical" | "family" | "unmapped";
+
+export interface ClaudeModelObservation {
+  requested: string;
+  resolved: string;
+  match: ClaudeModelMatch;
+  resolvedDisabled: boolean;
+  count: number;
+  lastSeen: string;
+  mapped: boolean;
+  target: string | null;
+}
+
+export interface ClaudeModelObservationsResponse {
+  object: string;
+  count: number;
+  data: ClaudeModelObservation[];
+}
+
+/** Model ids Claude Code has actually sent recently (in-memory on the server). */
+export async function fetchClaudeCodeModels(): Promise<ClaudeModelObservationsResponse> {
+  const res = await fetch(`${V1_BASE}/admin/claude-code/models`, {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());

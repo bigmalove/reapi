@@ -42,6 +42,7 @@ Two artifacts in a pnpm monorepo:
 | POST | /v1/chat/completions | Chat completion (core endpoint) |
 | POST | /v1/messages | Anthropic Messages API (Claude Code entry point) |
 | POST | /v1/messages/count_tokens | Anthropic token counting (proxied / estimated) |
+| GET | /v1/admin/claude-code/models | Model ids Claude Code recently sent + how they resolved |
 | GET | /v1/admin/models | List all models with status (`custom: true` = operator-added) |
 | PATCH | /v1/admin/models | Enable/disable models |
 | GET | /v1/admin/openrouter/models | Remote OpenRouter catalog (`?refresh=1` bypasses cache) |
@@ -152,22 +153,54 @@ Claude Code speaks the Anthropic Messages API, not OpenAI's. `POST /v1/messages`
   `cache_control` cannot be represented in this format and are dropped.
 
 **Model id resolution** (`resolveClaudeCodeModel`). Claude Code sends ids that
-are not in `MODEL_REGISTRY`, so they are normalised in this order:
+are not in `MODEL_REGISTRY`, so they are normalised in this order (operator
+mapping first):
 
 | Input | Registry id |
 |-------|-------------|
+| *(operator mapping hit)* | whatever the mapping says (any provider) |
 | `claude-sonnet-4-5-20250929` | `claude-sonnet-4-5` (date dropped) |
 | `claude-sonnet-4-5-20250929[1m]` | `claude-sonnet-4-5` (`[1m]` 1M-context marker dropped) |
 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | `claude-sonnet-4-5` (Bedrock/Vertex prefix) |
 | `claude-sonnet-4.5` | `claude-sonnet-4-5` (`4.5` == `4-5`) |
-| `claude-3-5-haiku-20241022` | `claude-haiku-4-5` (retired version → newest of family) |
+| `claude-3-5-haiku-20241022` | `claude-haiku-4-5` (retired version → newest *enabled* of family) |
 | `claude-*-fast` / `-1m` / `-latest` | same model without the serving marker |
 | `claude-*-thinking[-level]` | base model + thinking enabled at that level |
 
-The family fallback (newest `claude-<opus|sonnet|haiku>-*` in the registry) is
-what keeps retired ids such as `claude-3-5-sonnet-20241022` working; it is
-reported in the request log as `match: "family"`. Unknown ids return
-`404 not_found_error`.
+The family fallback (newest **enabled** `claude-<opus|sonnet|haiku>-*` in the
+registry) is what keeps retired ids such as `claude-3-5-sonnet-20241022`
+working; it is reported in the request log as `match: "family"`. Unknown ids
+return `404 not_found_error` unless a `*` fallback is configured.
+
+### Model mapping (admin portal → Configuration)
+
+`server_settings.json` → `claudeCodeModelMap` is a `{clientModelId: gatewayModelId}`
+map applied **before** every heuristic, so an operator can pin an id Claude Code
+sends (`claude-haiku-5-5`, a retired snapshot, a plugin's own alias) to any
+gateway model — including another provider (`gpt-5.5`, `gemini-3.1-pro-preview`).
+Managed in the portal's「Claude Code 模型映射」card, or via API:
+
+```bash
+# whole-map replacement; {} clears it
+curl -X POST $GW/api/settings -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"claudeCodeModelMap":{"claude-haiku-5-5":"claude-haiku-4-5","*":"claude-sonnet-4-5"}}'
+```
+
+- Keys are matched exactly, case-insensitively, and date/version/`[1m]`
+  insensitively — one row for `claude-sonnet-4-5` also covers
+  `claude-sonnet-4-5-20250929[1m]`.
+- `"*"` is the wildcard fallback: used when the id resolves to nothing, or to a
+  model that is disabled. Explicit mappings and exact ids always win, so the
+  wildcard cannot shadow them. This is what keeps an agent asking for
+  `claude-haiku-5-5` working on a gateway where every Claude model is disabled.
+- A mapping that points at a disabled model fails with an actionable message
+  (`model X is mapped to Y, which is disabled…`) instead of a bare 400.
+- Cap: 200 entries; keys/values are trimmed and length-capped server-side.
+- `GET /v1/admin/claude-code/models` lists the ids Claude Code has actually
+  sent recently (in-memory, 50 entries) with the id each resolved to, the match
+  kind, request count and whether the target is disabled — the portal renders
+  it under the mapping editor with one-click「加映射」.
 
 **Anthropic beta flags.** Claude Code sends `anthropic-beta` values meant for
 its own first-party OAuth session: `oauth-2025-04-20` and `claude-code-*`. A

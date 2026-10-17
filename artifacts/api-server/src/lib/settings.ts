@@ -12,6 +12,17 @@ export type ProviderOverrides = Record<ProviderName, ProviderOverride>;
 
 export type ReverseProxyMode = "round-robin" | "sticky";
 
+/**
+ * Operator-defined aliases for the Claude Code entry point: the model id a
+ * client sends (`claude-haiku-5-5`, or a retired snapshot) → the gateway model
+ * that should serve it. Checked before the automatic registry resolution, so an
+ * operator can pin a family, point an id at any provider, or work around a
+ * disabled model without touching the client.
+ */
+export type ClaudeCodeModelMap = Record<string, string>;
+
+export const MAX_CLAUDE_CODE_MODEL_MAP = 200;
+
 export interface PoolEntry {
   url: string;
   apiKey: string;
@@ -90,6 +101,11 @@ export interface DisabledUpstreamNode {
 export interface ServerSettings {
   sillyTavernMode: boolean;
   /**
+   * Map of client-facing model ids → gateway model ids for `/v1/messages`
+   * (the Claude Code entry point). See `ClaudeCodeModelMap`.
+   */
+  claudeCodeModelMap: ClaudeCodeModelMap;
+  /**
    * Synthetic stream shim for Antigravity-Gateway wrapped requests
    * (`agw_emit_*` synthetic transport tool): re-encode the streamed answer
    * into incremental tool_call argument deltas instead of forwarding the
@@ -117,6 +133,7 @@ const EMPTY_OVERRIDES: ProviderOverrides = {
 
 const DEFAULTS: ServerSettings = {
   sillyTavernMode: false,
+  claudeCodeModelMap: {},
   syntheticStreamShim: true,
   reverseProxyEnabled: false,
   reverseProxyMode: "sticky",
@@ -170,6 +187,27 @@ function normalizePool(raw: unknown): PoolEntry[] {
 
 function normalizeMode(raw: unknown): ReverseProxyMode {
   return raw === "round-robin" ? "round-robin" : "sticky";
+}
+
+/**
+ * Coerce a persisted / client-supplied model map. Keys and values are trimmed,
+ * empty and over-long entries are dropped, and the entry count is capped so a
+ * bad client cannot blow up the settings row.
+ */
+export function normalizeClaudeCodeModelMap(raw: unknown): ClaudeCodeModelMap {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: ClaudeCodeModelMap = {};
+  let count = 0;
+  for (const [rawKey, rawValue] of Object.entries(raw as Record<string, unknown>)) {
+    if (count >= MAX_CLAUDE_CODE_MODEL_MAP) break;
+    if (typeof rawValue !== "string") continue;
+    const key = rawKey.trim().slice(0, 200);
+    const value = rawValue.trim().slice(0, 200);
+    if (!key || !value) continue;
+    out[key] = value;
+    count++;
+  }
+  return out;
 }
 
 function normalizeDisabledNodes(raw: unknown): DisabledUpstreamNode[] {
@@ -270,6 +308,7 @@ export async function initSettings(): Promise<void> {
   _settings = {
     ...DEFAULTS,
     sillyTavernMode: typeof loaded["sillyTavernMode"] === "boolean" ? loaded["sillyTavernMode"] : DEFAULTS.sillyTavernMode,
+    claudeCodeModelMap: normalizeClaudeCodeModelMap(loaded["claudeCodeModelMap"]),
     syntheticStreamShim:
       typeof loaded["syntheticStreamShim"] === "boolean"
         ? loaded["syntheticStreamShim"]
@@ -424,6 +463,10 @@ export function updateSettings(patch: Partial<ServerSettings>): ServerSettings {
 
   if (patch.reverseProxyMode !== undefined) {
     next.reverseProxyMode = normalizeMode(patch.reverseProxyMode);
+  }
+
+  if (patch.claudeCodeModelMap !== undefined) {
+    next.claudeCodeModelMap = normalizeClaudeCodeModelMap(patch.claudeCodeModelMap);
   }
 
   _settings = next;

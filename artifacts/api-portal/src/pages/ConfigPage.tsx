@@ -9,6 +9,8 @@ import {
   checkUpstreamNodes,
   checkUpstreamNodesAi,
   checkDisabledUpstreamNodes,
+  fetchAdminModels,
+  fetchClaudeCodeModels,
   verifyKey,
   setClientKey,
   getApiKey,
@@ -22,6 +24,7 @@ import {
   type DisabledUpstreamNode,
   type NodeCheckResult,
   type NodeAiCheckResult,
+  type ClaudeModelObservation,
 } from "../lib/api";
 
 const PROVIDERS: readonly ProviderName[] = ["openai", "anthropic", "gemini", "openrouter"];
@@ -133,6 +136,15 @@ export default function ConfigPage() {
   // Cooldowns state (nodeUrl → remaining ms)
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
 
+  // Claude Code model mapping editor.
+  const [ccRows, setCcRows] = useState<Array<{ from: string; to: string }>>([]);
+  const [ccSaving, setCcSaving] = useState(false);
+  const [ccSaved, setCcSaved] = useState(false);
+  const [ccErr, setCcErr] = useState("");
+  const [ccModels, setCcModels] = useState<Array<{ id: string; provider: string; disabled: boolean }>>([]);
+  const [ccObserved, setCcObserved] = useState<ClaudeModelObservation[]>([]);
+  const [ccObsErr, setCcObsErr] = useState("");
+
   // Collapsible state for pool entries and disabled nodes.
   const [poolExpanded, setPoolExpanded] = useState(false);
   const [disabledExpanded, setDisabledExpanded] = useState(false);
@@ -162,6 +174,67 @@ export default function ConfigPage() {
       next[p] = { url: cfg.providerOverrides?.[p]?.url ?? "", apiKey: "" };
     }
     setOverrideDrafts(next);
+    setCcRows(
+      Object.entries(cfg.claudeCodeModelMap ?? {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([from, to]) => ({ from, to })),
+    );
+  }
+
+  function friendlyError(e: unknown): string {
+    const raw = String(e).replace(/^Error:\s*/, "");
+    try {
+      const parsed = JSON.parse(raw) as { error?: { message?: string } };
+      if (parsed?.error?.message) return parsed.error.message;
+    } catch {
+      // not JSON
+    }
+    return raw;
+  }
+
+  async function refreshClaudeCodeModels() {
+    try {
+      const res = await fetchClaudeCodeModels();
+      setCcObserved(res.data);
+      setCcObsErr("");
+    } catch (e) {
+      setCcObsErr(friendlyError(e));
+    }
+  }
+
+  async function saveClaudeCodeMap() {
+    setCcSaving(true);
+    setCcErr("");
+    try {
+      const map: Record<string, string> = {};
+      for (const row of ccRows) {
+        const from = row.from.trim();
+        const to = row.to.trim();
+        if (!from || !to) continue;
+        map[from] = to;
+      }
+      const updated = await updateSettings({ claudeCodeModelMap: map });
+      setSettings(updated);
+      setCcSaved(true);
+      setTimeout(() => setCcSaved(false), 2500);
+      void refreshClaudeCodeModels();
+    } catch (e) {
+      setCcErr(friendlyError(e));
+    } finally {
+      setCcSaving(false);
+    }
+  }
+
+  function addCcRow(from = "", to = "") {
+    setCcRows((prev) => [...prev, { from, to }]);
+  }
+
+  function removeCcRow(index: number) {
+    setCcRows((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function updateCcRow(index: number, patch: Partial<{ from: string; to: string }>) {
+    setCcRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   }
 
   useEffect(() => {
@@ -174,6 +247,12 @@ export default function ConfigPage() {
       .catch(() => {
         // Likely 401 — admin key not yet entered. Silent; user will save key.
       });
+    fetchAdminModels()
+      .then((res) => setCcModels(res.data.map((m) => ({ id: m.id, provider: m.provider, disabled: m.disabled }))))
+      .catch(() => {
+        // 401 until the admin key is saved.
+      });
+    void refreshClaudeCodeModels();
   }, []);
 
   // Poll cooldowns every 3 seconds so the countdown stays live.
@@ -1424,6 +1503,166 @@ export default function ConfigPage() {
               }`}
             />
           </button>
+        </div>
+      </div>
+
+      {/* Claude Code model mapping */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Claude Code 模型映射</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Claude Code 及其上的 Agent 会发送网关里不存在的模型名（如{" "}
+            <code className="bg-secondary/60 px-1 rounded">claude-haiku-5-5</code>）。网关默认先做名字归一化
+            （日期快照、<code className="bg-secondary/60 px-1 rounded">[1m]</code>、Bedrock/Vertex 前缀、{" "}
+            <code className="bg-secondary/60 px-1 rounded">4.5</code>==
+            <code className="bg-secondary/60 px-1 rounded">4-5</code>），再按家族回退到最新启用模型。
+            这里配置的映射优先级最高，可把任意客户端模型名固定到任意网关模型（也支持跨服务商，
+            如 <code className="bg-secondary/60 px-1 rounded">gpt-5.5</code>）。左侧填{" "}
+            <code className="bg-secondary/60 px-1 rounded">*</code>{" "}
+            表示兜底：解析不到、或解析出的模型已被禁用时，改用该模型。
+          </p>
+        </div>
+
+        <datalist id="cc-model-ids">
+          {ccModels.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.provider}
+              {m.disabled ? " · 已禁用" : ""}
+            </option>
+          ))}
+        </datalist>
+
+        <div className="space-y-2">
+          {ccRows.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              还没有映射。下面「最近收到的模型名」里点「加映射」即可快速补一条。
+            </p>
+          )}
+          {ccRows.map((row, i) => {
+            const known = ccModels.find((m) => m.id === row.to.trim());
+            const invalid = row.to.trim().length > 0 && !known;
+            const targetDisabled = known?.disabled === true;
+            return (
+              <div key={i} className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={row.from}
+                    onChange={(e) => updateCcRow(i, { from: e.target.value })}
+                    placeholder="客户端模型名，如 claude-haiku-5-5"
+                    className="min-w-[180px] flex-1 rounded-md border border-input bg-secondary/30 px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <span className="text-xs text-muted-foreground">→</span>
+                  <input
+                    type="text"
+                    list="cc-model-ids"
+                    value={row.to}
+                    onChange={(e) => updateCcRow(i, { to: e.target.value })}
+                    placeholder="网关模型，如 claude-haiku-4-5"
+                    className={`min-w-[180px] flex-1 rounded-md border bg-secondary/30 px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                      invalid || targetDisabled ? "border-destructive/50" : "border-input"
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeCcRow(i)}
+                    className="rounded border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[10px] text-destructive hover:bg-destructive/20"
+                    title="删除"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {invalid && (
+                  <p className="text-[11px] text-destructive">
+                    网关里没有这个模型 id — 保存后请求会返回 404。
+                  </p>
+                )}
+                {!invalid && targetDisabled && (
+                  <p className="text-[11px] text-destructive">
+                    该模型已禁用 — 映射到它会返回 400，需先在「模型管理」启用。
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => addCcRow()}
+            className="rounded-md border border-border bg-secondary/30 px-3 py-1.5 text-xs text-foreground hover:bg-secondary/60 transition-colors"
+          >
+            + 添加一行
+          </button>
+          <button
+            type="button"
+            onClick={() => addCcRow("*", "")}
+            className="rounded-md border border-border bg-secondary/30 px-3 py-1.5 text-xs text-foreground hover:bg-secondary/60 transition-colors"
+            title="解析不到或目标被禁用时使用的模型"
+          >
+            + 兜底 (*)
+          </button>
+          <button
+            type="button"
+            disabled={ccSaving || !settings}
+            onClick={saveClaudeCodeMap}
+            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {ccSaving ? "保存中..." : "保存映射"}
+          </button>
+          {ccSaved && <span className="text-xs text-green-500">已保存</span>}
+          {ccErr && <span className="text-xs text-destructive">{ccErr}</span>}
+        </div>
+
+        <div className="space-y-1.5 border-t border-border pt-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              最近收到的模型名
+            </p>
+            <button
+              type="button"
+              onClick={() => void refreshClaudeCodeModels()}
+              className="rounded border border-border bg-secondary/30 px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-secondary/60 transition-colors"
+            >
+              刷新
+            </button>
+          </div>
+          {ccObsErr && <p className="text-[11px] text-destructive">{ccObsErr}</p>}
+          {!ccObsErr && ccObserved.length === 0 && (
+            <p className="text-xs text-muted-foreground">暂无记录 — 先用 Claude Code 发一条请求。</p>
+          )}
+          {ccObserved.slice(0, 8).map((o) => {
+            const mappable = !o.mapped;
+            return (
+              <div
+                key={o.requested}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground"
+              >
+                <code className="text-foreground">{o.requested}</code>
+                <span>→</span>
+                <code className={o.resolvedDisabled ? "text-destructive" : "text-foreground"}>
+                  {o.resolved}
+                </code>
+                <span className="rounded bg-secondary/60 px-1 py-0.5 text-[10px]">
+                  {o.match}
+                </span>
+                {o.resolvedDisabled && <span className="text-destructive">目标已禁用</span>}
+                <span>×{o.count}</span>
+                {mappable ? (
+                  <button
+                    type="button"
+                    onClick={() => addCcRow(o.requested, o.resolvedDisabled ? "" : o.resolved)}
+                    className="rounded border border-border bg-secondary/30 px-1.5 py-0.5 text-[10px] hover:bg-secondary/60 transition-colors"
+                  >
+                    加映射
+                  </button>
+                ) : (
+                  <span className="text-[10px] text-green-500">已映射 → {o.target}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
