@@ -1,4 +1,10 @@
-import { disableUpstreamNode, REPLIT_HOSTING_SHUTDOWN, FREE_TIER_RECOVERY_MS } from "./settings.js";
+import {
+  disableUpstreamNode,
+  REPLIT_HOSTING_SHUTDOWN,
+  FREE_TIER_RECOVERY_MS,
+  NODE_SERVER_ERROR,
+  SERVER_ERROR_RECOVERY_MS,
+} from "./settings.js";
 import { logger } from "./logger.js";
 import { setNodeCooldown, rotateNodeToEnd } from "./providerEndpoint.js";
 import type { ProviderEndpoint } from "./providerEndpoint.js";
@@ -284,14 +290,49 @@ export function maybeDisableSelectedNode(args: {
 
   const signal = parseNodeSignal(responseStatus, responseBody);
   if (!signal) {
-    // A 5xx carrying no recognisable signal means the node's own relay failed
-    // before it could answer — observed as HTTP 500 with a completely empty
-    // body when the node's Replit AI Integration is unhealthy. The condition is
-    // persistent per node (4/4 on repeat) and can affect the majority of a live
-    // pool, while a pool's head is whatever was configured last — so without
-    // this branch nothing is recorded and sticky mode keeps hammering pool[0].
-    // Treat it as a transient node fault: cool it down and move it to the tail,
-    // which is what actually hands the caller's retry a different node.
+    // HTTP 500 with nothing but an empty body is the signature of a node whose
+    // Replit AI Integration cannot mint a credential (`metasidecar: failed to
+    // get modelfarm app credential`). The node process stays up and
+    // /api/setup-status keeps reporting every provider `configured: true`, so
+    // nothing else flags it — and the condition is permanent until the
+    // deployment is republished.
+    //
+    // A 500 therefore goes straight to the disabled list on the first hit: the
+    // portal lists it, logs why, and the operator re-enables it after
+    // republishing. Leaving it in the pool as a mere cooldown would drag the
+    // node back in after 60 seconds, over and over, while sticky mode keeps
+    // handing it the next request.
+    //
+    // Only 500 is treated this way. Other 5xx codes are left on the existing
+    // cooldown path: 502/503/504 usually mean the node or the edge is briefly
+    // unwell, which the cooldown already covers without disabling the node.
+    if (responseStatus === 500) {
+      const lastError = responseBody.trim()
+        ? `HTTP 500: ${responseBody.slice(0, 200)}`
+        : "HTTP 500 with an empty response body (AI credential unavailable)";
+      logger.warn(
+        {
+          nodeUrl: endpoint.nodeUrl,
+          upstreamStatus: responseStatus,
+          bodyLength: responseBody.length,
+          recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
+        },
+        "upstream node returned 500 — removing node from pool",
+      );
+      disableUpstreamNode({
+        url: endpoint.nodeUrl,
+        disabledReason: "upstream-node-unavailable",
+        upstreamReason: NODE_SERVER_ERROR,
+        upstreamStatus: responseStatus,
+        lastError,
+        recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
+      });
+      return;
+    }
+
+    // Other 5xx with no recognisable signal: cool the node down and move it to
+    // the tail, which hands the caller's retry a different node without
+    // permanently dropping it from the pool.
     if (responseStatus >= 500) {
       logger.warn(
         { nodeUrl: endpoint.nodeUrl, upstreamStatus: responseStatus, bodyLength: responseBody.length },

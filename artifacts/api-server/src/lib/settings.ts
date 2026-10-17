@@ -45,6 +45,28 @@ export const NODE_PROBE_OFFLINE = "probe-offline";
  */
 export const FREE_TIER_RECOVERY_MS = 31 * 24 * 60 * 60 * 1000;
 
+/**
+ * `upstreamReason` for a node disabled after it kept answering 5xx with no
+ * recognisable node signal — observed as HTTP 500 with a completely empty body
+ * when the deployment's Replit AI Integration cannot mint a credential
+ * (`metasidecar: failed to get modelfarm app credential`). The node process is
+ * alive and `/api/setup-status` still reports every provider `configured: true`,
+ * so nothing else catches it: a single failure looks transient, which is why the
+ * node is only cooled down at first (see upstreamNodeFailure.ts). Once the same
+ * node has failed repeatedly the condition is clearly persistent and it is moved
+ * to the disabled list, where the portal shows it and offers re-enable.
+ */
+export const NODE_SERVER_ERROR = "server-error";
+
+/**
+ * How long a node stays disabled after repeated 5xx. Republishing the
+ * deployment mints a fresh AI credential, but that is a manual step — this
+ * window gives the node a chance to come back on its own in case the platform
+ * side recovers, and bounds how long a genuinely broken node sits out. A node
+ * that is still broken simply fails again and drops out of the pool once more.
+ */
+export const SERVER_ERROR_RECOVERY_MS = 6 * 60 * 60 * 1000;
+
 /** `upstreamReason` values that denote an exhausted free-tier budget. */
 const BUDGET_REASON_RE = /FREE_TIER|budget|spend/i;
 

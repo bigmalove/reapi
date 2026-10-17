@@ -989,6 +989,7 @@ export default function ConfigPage() {
                       : node.disabledReason;
                   const isBudget = !!node.upstreamReason && /FREE_TIER|budget|spend/i.test(node.upstreamReason);
                   const isOffline = node.upstreamReason === "probe-offline" || node.upstreamReason === "replit-hosting-shutdown";
+                  const isServerError = node.upstreamReason === "server-error";
                   const recoverMs = node.recoverAt ? Date.parse(node.recoverAt) : NaN;
                   const recoverLabel = Number.isNaN(recoverMs)
                     ? null
@@ -1015,6 +1016,11 @@ export default function ConfigPage() {
                             {isBudget && (
                               <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/10 text-amber-300/80">
                                 免费额度耗尽
+                              </span>
+                            )}
+                            {isServerError && (
+                              <span className="text-[10px] rounded px-1.5 py-0.5 bg-rose-500/10 text-rose-300/80">
+                                500 无响应（需重新发布）
                               </span>
                             )}
                             {node.disabledAt && (
