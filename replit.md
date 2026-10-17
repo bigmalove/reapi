@@ -188,6 +188,18 @@ model. `max_tokens` is raised above the budget when needed. On the conversion
 path a thinking request upgrades the routed model to its `-thinking-<level>`
 registry variant so reasoning models receive the effort.
 
+**Unsupported body fields are stripped automatically.** Anthropic gates
+`context_management`, `container`, `mcp_servers`, `service_tier` (and whatever
+Claude Code adds next) behind betas, and an endpoint that does not implement one
+rejects the entire request with `"<field>: Extra inputs are not permitted"` —
+which is what Replit's modelfarm proxy answers when Claude Code sends
+`context_management` on every request. Instead of keeping a blacklist that goes
+stale, the gateway reads the offending field name out of the 400, deletes it,
+and retries (up to 4 fields). What was learned is remembered per upstream URL,
+so only the first request after a restart pays the extra round trip. Fields in
+`CORE_NATIVE_FIELDS` (`model`, `messages`, `system`, `max_tokens`, `stream`) are
+never dropped — an error naming one of those is relayed to the client.
+
 **count_tokens.** Proxied to `<anthropic baseUrl>/v1/messages/count_tokens` when
 the model is served by Anthropic (8s timeout). Any other provider — or an
 upstream without that route — gets a local estimate (`estimateAnthropicInputTokens`:

@@ -262,6 +262,50 @@ interface NativeAttempt {
   error?: Error;
 }
 
+/**
+ * Body fields that must never be dropped: removing one would silently change
+ * what the model sees (system prompt, history) or invalidate the request.
+ */
+const CORE_NATIVE_FIELDS = new Set(["model", "messages", "system", "max_tokens", "stream"]);
+
+/**
+ * Anthropic gates several body fields behind betas — `context_management`,
+ * `container`, `mcp_servers`, `service_tier`, and whatever Claude Code adds
+ * next — and an endpoint that does not implement one rejects the whole request
+ * with `"<field>: Extra inputs are not permitted"`. Intermediaries (Replit's
+ * modelfarm proxy, older pool nodes) do exactly that, and Claude Code sends
+ * `context_management` on every single request, so proxying it blindly turns
+ * every call into a 400.
+ *
+ * Instead of maintaining a field blacklist that goes stale, the offending field
+ * is read out of the error and stripped, then the request is retried once. What
+ * was learned is remembered per upstream URL, so only the first request to a
+ * given endpoint pays the extra round trip.
+ */
+const learnedUnsupportedFields = new Map<string, Set<string>>();
+const MAX_LEARNED_UPSTREAMS = 32;
+const MAX_STRIP_ROUNDS = 4;
+
+function learnedFieldsFor(baseUrl: string): Set<string> {
+  let fields = learnedUnsupportedFields.get(baseUrl);
+  if (!fields) {
+    if (learnedUnsupportedFields.size >= MAX_LEARNED_UPSTREAMS) learnedUnsupportedFields.clear();
+    fields = new Set();
+    learnedUnsupportedFields.set(baseUrl, fields);
+  }
+  return fields;
+}
+
+function rememberUnsupportedField(baseUrl: string, field: string): void {
+  learnedFieldsFor(baseUrl).add(field);
+}
+
+/** `"context_management: Extra inputs are not permitted"` → `context_management`. */
+function extractExtraInputField(text: string): string | null {
+  const match = text.match(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*Extra inputs are not permitted/i);
+  return match ? match[1]! : null;
+}
+
 async function forwardNativeOnce(args: {
   res: ExpressResponse;
   body: AnthropicMessagesBody;
@@ -292,42 +336,75 @@ async function forwardNativeOnce(args: {
   };
 
   const url = `${endpoint.baseUrl}/v1/messages`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: outboundHeaders,
-      body: JSON.stringify(outbound),
-    });
-  } catch (err) {
-    return {
-      done: false,
-      nodeFault: true,
-      error: new Error(`Anthropic request failed: ${err instanceof Error ? err.message : String(err)}`),
-    };
+
+  // Drop fields this endpoint already rejected once, so later requests do not
+  // pay for the discovery round trip again.
+  for (const field of learnedFieldsFor(endpoint.baseUrl)) delete outbound[field];
+
+  let response: Response | null = null;
+  let failure: { status: number; text: string } | null = null;
+
+  for (let round = 0; ; round++) {
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: outboundHeaders,
+        body: JSON.stringify(outbound),
+      });
+    } catch (err) {
+      return {
+        done: false,
+        nodeFault: true,
+        error: new Error(
+          `Anthropic request failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      };
+    }
+    if (response.ok) break;
+
+    const text = await response.text();
+    const field = response.status === 400 ? extractExtraInputField(text) : null;
+    if (field && !CORE_NATIVE_FIELDS.has(field) && field in outbound && round < MAX_STRIP_ROUNDS) {
+      delete outbound[field];
+      rememberUnsupportedField(endpoint.baseUrl, field);
+      logger.warn(
+        { field, url, round: round + 1 },
+        "upstream rejected an optional Anthropic body field — dropping it and retrying",
+      );
+      continue;
+    }
+
+    failure = { status: response.status, text };
+    break;
   }
 
-  if (!response.ok) {
-    const text = await response.text();
-    maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    const nodeFault = response.status === 429 || response.status >= 500;
+  if (failure) {
+    maybeDisableSelectedNode({
+      endpoint,
+      responseStatus: failure.status,
+      responseBody: failure.text,
+    });
+    const nodeFault = failure.status === 429 || failure.status >= 500;
     if (nodeFault) {
       return {
         done: false,
         nodeFault: true,
-        error: new Error(`Anthropic error ${response.status}: ${text.slice(0, 2000)}`),
+        error: new Error(`Anthropic error ${failure.status}: ${failure.text.slice(0, 2000)}`),
       };
     }
     // A genuine client-side error (bad request, unknown model, auth) is relayed
     // untouched so Claude Code can show the upstream message.
-    res.status(response.status).json(parseAnthropicErrorBody(text, statusToErrorType(response.status)));
+    res
+      .status(failure.status)
+      .json(parseAnthropicErrorBody(failure.text, statusToErrorType(failure.status)));
     return { done: true, nodeFault: false };
   }
 
-  const contentType = response.headers.get("content-type") ?? "";
+  const ok = response as Response;
+  const contentType = ok.headers.get("content-type") ?? "";
 
   if (!stream) {
-    const text = await response.text();
+    const text = await ok.text();
     try {
       const parsed = JSON.parse(text) as AnthropicMessageResponse;
       parsed.model = requestedModel;
@@ -346,7 +423,7 @@ async function forwardNativeOnce(args: {
   // message. Re-encode it as SSE so Claude Code's stream parser still gets a
   // complete, well-formed event sequence.
   if (!contentType.includes("text/event-stream")) {
-    const text = await response.text();
+    const text = await ok.text();
     let parsed: (AnthropicMessageResponse & { type?: string; error?: unknown }) | null = null;
     try {
       parsed = JSON.parse(text) as AnthropicMessageResponse & { type?: string; error?: unknown };
@@ -366,7 +443,7 @@ async function forwardNativeOnce(args: {
     };
   }
 
-  const outcome = await relayAnthropicStream(response, res, requestedModel);
+  const outcome = await relayAnthropicStream(ok, res, requestedModel);
   if (!outcome.started) {
     handleEmptyUpstreamStream(endpoint);
     return {
