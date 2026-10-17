@@ -1,0 +1,598 @@
+import { Router, type Request, type Response as ExpressResponse } from "express";
+import { extractProvidedKey, getProxyKey } from "../../lib/auth.js";
+import { getDefaultModel, isModelDisabled, resolveProvider } from "../../lib/models.js";
+import { resolveProviderEndpoint } from "../../lib/providerEndpoint.js";
+import {
+  MAX_ATTEMPTS,
+  MAX_ATTEMPTS_NODE_FAULT,
+  callProvider,
+  isNodeFault,
+} from "../../lib/providerDispatch.js";
+import {
+  handleEmptyUpstreamStream,
+  maybeDisableSelectedNode,
+} from "../../lib/upstreamNodeFailure.js";
+import { resolveClaudeCodeModel, sanitizeAnthropicBeta } from "../../lib/claudeCode.js";
+import {
+  anthropicError,
+  anthropicMessageFromOpenAI,
+  anthropicToOpenAIRequest,
+  buildNativeAnthropicBody,
+  estimateAnthropicInputTokens,
+  parseAnthropicErrorBody,
+  stripThinkingForUpstream,
+  writeOpenAIStreamAsAnthropic,
+  type AnthropicMessageResponse,
+  type AnthropicMessagesBody,
+} from "../../lib/anthropicInbound.js";
+import { logger } from "../../lib/logger.js";
+import type { ChatCompletionResponse, StreamChunk } from "../../types.js";
+
+/**
+ * Anthropic Messages API entry point, so Claude Code can use this gateway by
+ * pointing `ANTHROPIC_BASE_URL` at it.
+ *
+ * Claude models are proxied natively to an Anthropic upstream (thinking blocks,
+ * cache_control breakpoints and tool_use ids survive untouched). Every other
+ * model is converted to the gateway's OpenAI-shaped request and the reply is
+ * re-encoded as Anthropic SSE events.
+ */
+
+const router = Router();
+
+function anthropicAuth(req: Request, res: ExpressResponse, next: () => void): void {
+  const proxyKey = getProxyKey();
+  if (!proxyKey) {
+    next();
+    return;
+  }
+  if (extractProvidedKey(req) !== proxyKey) {
+    // Claude Code reads the Anthropic error envelope, not OpenAI's.
+    res.status(401).json(anthropicError("authentication_error", "invalid x-api-key"));
+    return;
+  }
+  next();
+}
+
+function headerValue(req: Request, name: string): string | undefined {
+  const value = req.headers[name];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function statusToErrorType(status: number): string {
+  if (status === 401) return "authentication_error";
+  if (status === 403) return "permission_error";
+  if (status === 404) return "not_found_error";
+  if (status === 413) return "request_too_large";
+  if (status === 429) return "rate_limit_error";
+  if (status >= 500) return "api_error";
+  return "invalid_request_error";
+}
+
+function setSseHeaders(res: ExpressResponse): void {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+}
+
+// ── Native Anthropic relay ──────────────────────────────────────────────────
+
+interface RelayOutcome {
+  /** True once the first event reached the client. */
+  started: boolean;
+  events: number;
+}
+
+/**
+ * Relay an upstream Anthropic SSE stream verbatim, rewriting only the `model`
+ * echoed in `message_start` so the client sees the id it asked for.
+ *
+ * Headers are withheld until the first event arrives: an upstream that answers
+ * 200 and then closes without a single event can still be retried on another
+ * pool node.
+ */
+async function relayAnthropicStream(
+  upstream: Response,
+  res: ExpressResponse,
+  requestedModel: string,
+): Promise<RelayOutcome> {
+  if (!upstream.body) return { started: false, events: 0 };
+
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let started = false;
+  let events = 0;
+  let aborted = false;
+
+  const writeBlock = (raw: string): "ok" | "retry" => {
+    if (aborted) return "ok";
+    const dataLines: string[] = [];
+    let eventName = "";
+    for (const line of raw.split("\n")) {
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (dataLines.length === 0) {
+      if (started && raw.trim()) {
+        try {
+          res.write(`${raw}\n\n`);
+        } catch {
+          aborted = true;
+        }
+      }
+      return "ok";
+    }
+
+    const dataText = dataLines.join("\n");
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(dataText) as Record<string, unknown>;
+    } catch {
+      parsed = null;
+    }
+
+    const type = typeof parsed?.["type"] === "string" ? (parsed["type"] as string) : eventName;
+
+    // An in-band error before any content is a node-level failure: let the
+    // caller cool the node down and retry instead of surfacing it.
+    if (type === "error" && !started) return "retry";
+
+    if (type === "message_start" && parsed) {
+      const message = parsed["message"];
+      if (message && typeof message === "object") {
+        (message as Record<string, unknown>)["model"] = requestedModel;
+      }
+    }
+
+    if (!started) {
+      setSseHeaders(res);
+      started = true;
+    }
+
+    try {
+      res.write(`event: ${type || "message"}\n`);
+      res.write(`data: ${parsed ? JSON.stringify(parsed) : dataText}\n\n`);
+    } catch {
+      aborted = true;
+      return "ok";
+    }
+    if (type !== "ping") events++;
+    return "ok";
+  };
+
+  try {
+    while (!aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        if (writeBlock(block) === "retry") {
+          await reader.cancel().catch(() => {});
+          return { started: false, events: 0 };
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    buffer += decoder.decode();
+    if (!aborted && buffer.trim()) writeBlock(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (aborted) return { started, events };
+  if (started) res.end();
+  return { started, events };
+}
+
+/** Re-encode a complete Anthropic message as an SSE stream. */
+function writeMessageAsStream(
+  res: ExpressResponse,
+  message: AnthropicMessageResponse,
+  requestedModel: string,
+): void {
+  setSseHeaders(res);
+  const write = (event: string, payload: Record<string, unknown>): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  write("message_start", {
+    type: "message_start",
+    message: { ...message, model: requestedModel, content: [], stop_reason: null },
+  });
+
+  message.content.forEach((block, index) => {
+    if (block["type"] === "tool_use") {
+      write("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "tool_use", id: block["id"], name: block["name"], input: {} },
+      });
+      write("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify(block["input"] ?? {}) },
+      });
+    } else if (block["type"] === "thinking") {
+      write("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "thinking", thinking: "" },
+      });
+      write("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "thinking_delta", thinking: String(block["thinking"] ?? "") },
+      });
+    } else {
+      write("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "text", text: "" },
+      });
+      write("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "text_delta", text: String(block["text"] ?? "") },
+      });
+    }
+    write("content_block_stop", { type: "content_block_stop", index });
+  });
+
+  write("message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: message.stop_reason, stop_sequence: null },
+    usage: { output_tokens: message.usage.output_tokens },
+  });
+  write("message_stop", { type: "message_stop" });
+  res.end();
+}
+
+interface NativeAttempt {
+  /** The response was fully handled (or relayed): stop retrying. */
+  done: boolean;
+  /** The failure is a node-level fault, so a retry may land on a good node. */
+  nodeFault: boolean;
+  error?: Error;
+}
+
+async function forwardNativeOnce(args: {
+  res: ExpressResponse;
+  body: AnthropicMessagesBody;
+  model: string;
+  requestedModel: string;
+  stream: boolean;
+  clientHeaders: Record<string, string>;
+}): Promise<NativeAttempt> {
+  const { res, body, model, requestedModel, stream, clientHeaders } = args;
+  const endpoint = resolveProviderEndpoint("anthropic");
+
+  const { model: upstreamModel, level, thinking } = stripThinkingForUpstream(model);
+  const outbound = buildNativeAnthropicBody(body, upstreamModel, {
+    thinkingLevel: level,
+    thinkingRequested: thinking,
+  });
+
+  const outboundHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-api-key": endpoint.apiKey,
+    "anthropic-version": clientHeaders["anthropic-version"] ?? "2023-06-01",
+    // Pool nodes gate their SSE path on this header; without it a streaming
+    // request takes the node's keep-alive heartbeat path (empty placeholder).
+    ...(stream ? { Accept: "text/event-stream" } : {}),
+    ...(clientHeaders["anthropic-beta"]
+      ? { "anthropic-beta": clientHeaders["anthropic-beta"] }
+      : {}),
+  };
+
+  const url = `${endpoint.baseUrl}/v1/messages`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: outboundHeaders,
+      body: JSON.stringify(outbound),
+    });
+  } catch (err) {
+    return {
+      done: false,
+      nodeFault: true,
+      error: new Error(`Anthropic request failed: ${err instanceof Error ? err.message : String(err)}`),
+    };
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
+    const nodeFault = response.status === 429 || response.status >= 500;
+    if (nodeFault) {
+      return {
+        done: false,
+        nodeFault: true,
+        error: new Error(`Anthropic error ${response.status}: ${text.slice(0, 2000)}`),
+      };
+    }
+    // A genuine client-side error (bad request, unknown model, auth) is relayed
+    // untouched so Claude Code can show the upstream message.
+    res.status(response.status).json(parseAnthropicErrorBody(text, statusToErrorType(response.status)));
+    return { done: true, nodeFault: false };
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (!stream) {
+    const text = await response.text();
+    try {
+      const parsed = JSON.parse(text) as AnthropicMessageResponse;
+      parsed.model = requestedModel;
+      res.json(parsed);
+    } catch {
+      return {
+        done: false,
+        nodeFault: true,
+        error: new Error(`Anthropic returned non-JSON body: ${text.slice(0, 500)}`),
+      };
+    }
+    return { done: true, nodeFault: false };
+  }
+
+  // Streaming was requested but the node ignored it and answered with a whole
+  // message. Re-encode it as SSE so Claude Code's stream parser still gets a
+  // complete, well-formed event sequence.
+  if (!contentType.includes("text/event-stream")) {
+    const text = await response.text();
+    let parsed: (AnthropicMessageResponse & { type?: string; error?: unknown }) | null = null;
+    try {
+      parsed = JSON.parse(text) as AnthropicMessageResponse & { type?: string; error?: unknown };
+    } catch {
+      parsed = null;
+    }
+    if (parsed && parsed.type === "message" && Array.isArray(parsed.content)) {
+      writeMessageAsStream(res, parsed, requestedModel);
+      return { done: true, nodeFault: false };
+    }
+    return {
+      done: false,
+      nodeFault: true,
+      error: new Error(
+        `Anthropic stream request returned ${contentType || "an unknown content type"}: ${text.slice(0, 500)}`,
+      ),
+    };
+  }
+
+  const outcome = await relayAnthropicStream(response, res, requestedModel);
+  if (!outcome.started) {
+    handleEmptyUpstreamStream(endpoint);
+    return {
+      done: false,
+      nodeFault: true,
+      error: new Error("Anthropic upstream returned an empty stream"),
+    };
+  }
+  return { done: true, nodeFault: false };
+}
+
+async function proxyAnthropicNative(args: {
+  res: ExpressResponse;
+  body: AnthropicMessagesBody;
+  model: string;
+  requestedModel: string;
+  stream: boolean;
+  clientHeaders: Record<string, string>;
+}): Promise<void> {
+  let last: NativeAttempt | null = null;
+
+  for (let attempt = 1; ; attempt++) {
+    const result = await forwardNativeOnce(args);
+    if (result.done) return;
+    last = result;
+
+    const limit = result.nodeFault ? MAX_ATTEMPTS_NODE_FAULT : MAX_ATTEMPTS;
+    if (attempt >= limit) break;
+    logger.warn(
+      { err: result.error, attempt, limit, model: args.model },
+      "claude code upstream attempt failed, retrying",
+    );
+  }
+
+  const message = last?.error?.message ?? "Anthropic upstream failed";
+  if (!args.res.headersSent) {
+    args.res.status(502).json(anthropicError("api_error", message));
+  } else {
+    args.res.end();
+  }
+}
+
+// ── Converted path (any non-Anthropic provider) ─────────────────────────────
+
+async function proxyConverted(args: {
+  res: ExpressResponse;
+  body: AnthropicMessagesBody;
+  model: string;
+  requestedModel: string;
+  stream: boolean;
+  clientHeaders: Record<string, string>;
+}): Promise<void> {
+  const { res, body, model, requestedModel, stream, clientHeaders } = args;
+  const provider = resolveProvider(model);
+  if (!provider) {
+    res.status(404).json(anthropicError("not_found_error", `model: ${requestedModel}`));
+    return;
+  }
+
+  const request = anthropicToOpenAIRequest(body, model);
+  let result: Awaited<ReturnType<typeof callProvider>> | undefined;
+  let lastErr: unknown;
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      result = await callProvider(provider, request, clientHeaders);
+      break;
+    } catch (err) {
+      lastErr = err;
+      const limit = isNodeFault(err) ? MAX_ATTEMPTS_NODE_FAULT : MAX_ATTEMPTS;
+      if (attempt >= limit) {
+        logger.error({ err, attempt, limit, provider }, "claude code conversion attempts exhausted");
+        break;
+      }
+      logger.warn({ err, attempt, limit, provider }, "claude code conversion attempt failed, retrying");
+    }
+  }
+
+  if (result === undefined) {
+    const message = lastErr instanceof Error ? lastErr.message : "Upstream error";
+    res.status(502).json(anthropicError("api_error", message));
+    return;
+  }
+
+  if (!stream) {
+    res.json(anthropicMessageFromOpenAI(result as ChatCompletionResponse, requestedModel));
+    return;
+  }
+
+  setSseHeaders(res);
+  try {
+    await writeOpenAIStreamAsAnthropic(
+      result as AsyncIterable<StreamChunk>,
+      (chunk) => res.write(chunk),
+      requestedModel,
+      estimateAnthropicInputTokens(body),
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Stream error";
+    logger.error({ err, provider }, "claude code stream error");
+    res.write(`event: error\ndata: ${JSON.stringify(anthropicError("api_error", message))}\n\n`);
+  } finally {
+    res.end();
+  }
+}
+
+// ── Routes ──────────────────────────────────────────────────────────────────
+
+router.post("/v1/messages", anthropicAuth, async (req: Request, res: ExpressResponse) => {
+  res.setTimeout(600_000);
+  req.socket.setTimeout(600_000);
+
+  const body = req.body as AnthropicMessagesBody;
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages)) {
+    res.status(400).json(anthropicError("invalid_request_error", "messages: field required"));
+    return;
+  }
+
+  const requestedModel =
+    typeof body.model === "string" && body.model.length > 0 ? body.model : getDefaultModel();
+  const resolution = resolveClaudeCodeModel(requestedModel);
+  const model = resolution.model;
+
+  if (isModelDisabled(model)) {
+    res.status(400).json(anthropicError("invalid_request_error", `model ${requestedModel} is disabled`));
+    return;
+  }
+
+  const provider = resolveProvider(model);
+  if (!provider) {
+    res.status(404).json(anthropicError("not_found_error", `model: ${requestedModel}`));
+    return;
+  }
+
+  const stream = body.stream === true;
+  const clientHeaders: Record<string, string> = {
+    "anthropic-version": headerValue(req, "anthropic-version") ?? "2023-06-01",
+  };
+  const beta = sanitizeAnthropicBeta(headerValue(req, "anthropic-beta"));
+  if (beta) clientHeaders["anthropic-beta"] = beta;
+
+  logger.info(
+    {
+      requestedModel,
+      model,
+      match: resolution.match,
+      provider,
+      stream,
+      messages: body.messages.length,
+      tools: Array.isArray(body.tools) ? body.tools.length : 0,
+      thinking: body.thinking?.type ?? null,
+      beta: beta ?? null,
+    },
+    "claude code request",
+  );
+
+  try {
+    if (provider === "anthropic") {
+      await proxyAnthropicNative({ res, body, model, requestedModel, stream, clientHeaders });
+    } else {
+      await proxyConverted({ res, body, model, requestedModel, stream, clientHeaders });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Internal error";
+    logger.error({ err, model }, "claude code request failed");
+    if (!res.headersSent) {
+      res.status(502).json(anthropicError("api_error", message));
+    } else {
+      res.end();
+    }
+  }
+});
+
+router.post("/v1/messages/count_tokens", anthropicAuth, async (req: Request, res: ExpressResponse) => {
+  const body = req.body as AnthropicMessagesBody;
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages)) {
+    res.status(400).json(anthropicError("invalid_request_error", "messages: field required"));
+    return;
+  }
+
+  const requestedModel =
+    typeof body.model === "string" && body.model.length > 0 ? body.model : getDefaultModel();
+  const { model } = resolveClaudeCodeModel(requestedModel);
+  const estimate = estimateAnthropicInputTokens(body);
+
+  // Claude Code uses this endpoint for context accounting. Proxy the real
+  // Anthropic counter when the model is served by Anthropic; fall back to the
+  // local estimate for other providers (or when the upstream lacks the route).
+  if (resolveProvider(model) === "anthropic") {
+    try {
+      const endpoint = resolveProviderEndpoint("anthropic");
+      const { model: upstreamModel, level, thinking } = stripThinkingForUpstream(model);
+      const upstreamBody = buildNativeAnthropicBody(body, upstreamModel, {
+        thinkingLevel: level,
+        thinkingRequested: thinking,
+        forCountTokens: true,
+      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(`${endpoint.baseUrl}/v1/messages/count_tokens`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": endpoint.apiKey,
+            "anthropic-version": headerValue(req, "anthropic-version") ?? "2023-06-01",
+          },
+          body: JSON.stringify(upstreamBody),
+          signal: controller.signal,
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { input_tokens?: unknown };
+          if (typeof data.input_tokens === "number") {
+            res.json({ input_tokens: data.input_tokens });
+            return;
+          }
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      logger.warn({ err, model }, "upstream count_tokens failed, using local estimate");
+    }
+  }
+
+  res.json({ input_tokens: estimate });
+});
+
+export default router;

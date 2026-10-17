@@ -6,7 +6,8 @@ export default function DocsPage() {
       <div>
         <h2 className="text-xl font-semibold text-foreground mb-1">API 文档</h2>
         <p className="text-sm text-muted-foreground">
-          所有接口均遵循 OpenAI API 规范,完全兼容 OpenAI 客户端。
+          对话接口同时提供 OpenAI 兼容（<code className="bg-secondary/60 px-1 rounded">/v1/chat/completions</code>）与
+          Anthropic 原生（<code className="bg-secondary/60 px-1 rounded">/v1/messages</code>）两套协议。
         </p>
       </div>
 
@@ -156,6 +157,54 @@ export default function DocsPage() {
         </div>
       </section>
 
+      {/* Claude Code */}
+      <section className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div className="flex items-center gap-3">
+          <span className="rounded px-2 py-0.5 text-xs font-mono font-bold bg-purple-500/10 text-purple-400">CC</span>
+          <h3 className="text-base font-semibold text-foreground">Claude Code 接入</h3>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          Claude Code 使用 Anthropic Messages 协议。把 <code className="bg-secondary/60 px-1 rounded">ANTHROPIC_BASE_URL</code>{" "}
+          指向网关根地址即可（<strong>不要</strong>带 <code className="bg-secondary/60 px-1 rounded">/v1</code>，
+          客户端会自己拼接 <code className="bg-secondary/60 px-1 rounded">/v1/messages</code>）。
+          网关会保留 thinking 块、工具调用与 prompt cache 断点；非 Claude 模型会自动转换成对应协议。
+        </p>
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">环境变量</p>
+          <pre className="rounded-md bg-secondary/40 p-3 text-xs text-foreground overflow-x-auto">
+            {`export ANTHROPIC_BASE_URL=${baseUrl}
+export ANTHROPIC_AUTH_TOKEN=<PROXY_API_KEY>
+export ANTHROPIC_MODEL=claude-sonnet-4-5
+export ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5
+claude`}
+          </pre>
+        </div>
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+            ~/.claude/settings.json
+          </p>
+          <pre className="rounded-md bg-secondary/40 p-3 text-xs text-foreground overflow-x-auto">
+            {`{
+  "env": {
+    "ANTHROPIC_BASE_URL": "${baseUrl}",
+    "ANTHROPIC_AUTH_TOKEN": "<PROXY_API_KEY>",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5"
+  }
+}`}
+          </pre>
+        </div>
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">模型名说明</p>
+          <p className="text-xs text-muted-foreground">
+            支持 Claude Code 发来的日期版本、<code className="bg-secondary/60 px-1 rounded">[1m]</code> 后缀、
+            Bedrock/Vertex 前缀与已下线版本（自动映射到同家族最新模型）。也可以用网关里的任意模型 id
+            （如 <code className="bg-secondary/60 px-1 rounded">gpt-5.5</code>、
+            <code className="bg-secondary/60 px-1 rounded">gemini-3.1-pro-preview</code>），网关会自动转换协议。
+          </p>
+        </div>
+      </section>
+
       {/* OpenAI Client SDK */}
       <section className="rounded-lg border border-border bg-card p-5 space-y-4">
         <h3 className="text-base font-semibold text-foreground">使用 OpenAI Python SDK</h3>
@@ -205,6 +254,8 @@ for chunk in stream:
                 ["POST", "/api/settings", "更新网关设置"],
                 ["GET", "/v1/models", "列出已启用的模型"],
                 ["POST", "/v1/chat/completions", "对话补全(核心接口)"],
+                ["POST", "/v1/messages", "Anthropic Messages 协议（Claude Code 入口）"],
+                ["POST", "/v1/messages/count_tokens", "Anthropic token 计数（上游代理或本地估算）"],
                 ["GET", "/v1/admin/models", "列出全部模型及其状态"],
                 ["PATCH", "/v1/admin/models", "启用/禁用模型"],
                 ["GET", "/v1/admin/openrouter/models", "远程拉取 OpenRouter 最新模型目录"],

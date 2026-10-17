@@ -4,6 +4,7 @@ import pinoHttp from "pino-http";
 import router from "./routes/index.js";
 import modelsRouter from "./routes/v1/models.js";
 import chatRouter from "./routes/v1/chat.js";
+import messagesRouter from "./routes/v1/messages.js";
 import imagesRouter from "./routes/v1/images.js";
 import videosRouter from "./routes/v1/videos.js";
 import { logger } from "./lib/logger.js";
@@ -30,6 +31,10 @@ app.use(
   }),
 );
 app.use(cors());
+// Claude Code inlines file contents and screenshots in the request body;
+// Anthropic's own limit is 32 MB, so the Messages API gets a larger budget than
+// the rest of the gateway. The global parser below skips already-parsed bodies.
+app.use("/v1/messages", express.json({ limit: "32mb" }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -40,6 +45,7 @@ app.get("/healthz", (_req, res) => {
 app.use(router);
 app.use(modelsRouter);
 app.use(chatRouter);
+app.use(messagesRouter);
 app.use(imagesRouter);
 app.use(videosRouter);
 

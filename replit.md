@@ -40,6 +40,8 @@ Two artifacts in a pnpm monorepo:
 | POST | /api/upstream-nodes/re-enable | Re-enable a disabled upstream node |
 | GET | /v1/models | List enabled models (OpenAI compatible) |
 | POST | /v1/chat/completions | Chat completion (core endpoint) |
+| POST | /v1/messages | Anthropic Messages API (Claude Code entry point) |
+| POST | /v1/messages/count_tokens | Anthropic token counting (proxied / estimated) |
 | GET | /v1/admin/models | List all models with status (`custom: true` = operator-added) |
 | PATCH | /v1/admin/models | Enable/disable models |
 | GET | /v1/admin/openrouter/models | Remote OpenRouter catalog (`?refresh=1` bypasses cache) |
@@ -124,6 +126,107 @@ catalog and lets the operator pick which models to add:
   variants yet and「删除思考变种」once they do. The catalog panel can't be used for this
   because it marks built-in ids as「已在列表」.
 
+## Claude Code Compatibility
+
+Claude Code speaks the Anthropic Messages API, not OpenAI's. `POST /v1/messages`
+(+ `POST /v1/messages/count_tokens`) makes the gateway usable as its
+`ANTHROPIC_BASE_URL`. Implemented in `artifacts/api-server/src/routes/v1/messages.ts`,
+`src/lib/anthropicInbound.ts` and `src/lib/claudeCode.ts`.
+
+**Two paths**
+
+- **Native passthrough** (`provider === "anthropic"`): the body is forwarded to
+  `<anthropic baseUrl>/v1/messages` almost untouched, so `thinking` blocks,
+  `cache_control` breakpoints, `tool_use` ids and `system` block arrays survive
+  the round trip. SSE is relayed verbatim; only `message_start.message.model` is
+  rewritten to the id the client asked for. Upstream 4xx errors are relayed with
+  their original status and Anthropic error envelope (so Claude Code can show
+  the real message); 429/5xx are treated as node faults and retried on another
+  pool entry (6 attempts, same policy as `/v1/chat/completions`).
+- **Conversion path** (openai / gemini / openrouter): the request is converted to
+  the gateway's OpenAI shape (`anthropicToOpenAIRequest`) and the reply is
+  re-encoded as Anthropic messages/SSE (`message_start` →
+  `content_block_start|delta|stop` → `message_delta` → `message_stop`). Tool
+  calls become `tool_use` blocks with `input_json_delta`; `tool_choice`
+  `auto|any|tool` maps to `auto|required|{function}`. Thinking blocks and
+  `cache_control` cannot be represented in this format and are dropped.
+
+**Model id resolution** (`resolveClaudeCodeModel`). Claude Code sends ids that
+are not in `MODEL_REGISTRY`, so they are normalised in this order:
+
+| Input | Registry id |
+|-------|-------------|
+| `claude-sonnet-4-5-20250929` | `claude-sonnet-4-5` (date dropped) |
+| `claude-sonnet-4-5-20250929[1m]` | `claude-sonnet-4-5` (`[1m]` 1M-context marker dropped) |
+| `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | `claude-sonnet-4-5` (Bedrock/Vertex prefix) |
+| `claude-sonnet-4.5` | `claude-sonnet-4-5` (`4.5` == `4-5`) |
+| `claude-3-5-haiku-20241022` | `claude-haiku-4-5` (retired version → newest of family) |
+| `claude-*-fast` / `-1m` / `-latest` | same model without the serving marker |
+| `claude-*-thinking[-level]` | base model + thinking enabled at that level |
+
+The family fallback (newest `claude-<opus|sonnet|haiku>-*` in the registry) is
+what keeps retired ids such as `claude-3-5-sonnet-20241022` working; it is
+reported in the request log as `match: "family"`. Unknown ids return
+`404 not_found_error`.
+
+**Anthropic beta flags.** Claude Code sends `anthropic-beta` values meant for
+its own first-party OAuth session: `oauth-2025-04-20` and `claude-code-*`. A
+plain `x-api-key` upstream rejects those, so they are stripped before the
+request leaves the gateway. Real API betas (`interleaved-thinking-*`,
+`fine-grained-tool-streaming-*`, `context-1m-*`, `prompt-caching-*`, …) pass
+through. Extra betas can be stripped with a comma-separated
+`CLAUDE_CODE_STRIP_BETAS` env var (prefix match on the beta name), for upstreams
+that reject a beta they do not implement.
+
+**Thinking translation.** Claude Code still sends the legacy
+`thinking: {type:"enabled", budget_tokens}` shape. For adaptive families
+(opus 4.6+, opus 5, sonnet 5, fable 5) it is translated to
+`thinking: {type:"adaptive", display:"summarized"}` + `output_config.effort`
+derived from the budget, and sampling params are dropped because those models
+reject them. The reverse happens when an adaptive block is sent to a legacy
+model. `max_tokens` is raised above the budget when needed. On the conversion
+path a thinking request upgrades the routed model to its `-thinking-<level>`
+registry variant so reasoning models receive the effort.
+
+**count_tokens.** Proxied to `<anthropic baseUrl>/v1/messages/count_tokens` when
+the model is served by Anthropic (8s timeout). Any other provider — or an
+upstream without that route — gets a local estimate (`estimateAnthropicInputTokens`:
+ASCII ≈ 4 chars/token, CJK ≈ 1.5 chars/token, 1600 tokens per image, plus tool
+and message overhead). It never fails; Claude Code uses it for context
+accounting only.
+
+**Other details.** Auth accepts both `x-api-key` and `Authorization: Bearer`
+(the latter is what `ANTHROPIC_AUTH_TOKEN` sends); failures use the Anthropic
+`{type:"error", error:{type, message}}` envelope. `/v1/messages` gets a 32 MB
+JSON limit (Claude Code inlines files and screenshots) while the rest of the
+gateway stays at 10 MB. If an upstream answers a streaming request with a
+complete JSON message, it is re-encoded as a well-formed SSE sequence. A 200
+response that closes without a single event is treated as an empty upstream
+stream: the node is cooled down and the next attempt uses another pool entry.
+
+**Setup**
+
+```bash
+export ANTHROPIC_BASE_URL=https://<gateway-host>      # no /v1 suffix
+export ANTHROPIC_AUTH_TOKEN=<PROXY_API_KEY>
+export ANTHROPIC_MODEL=claude-sonnet-4-5
+export ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5
+claude
+```
+
+Equivalent `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<gateway-host>",
+    "ANTHROPIC_AUTH_TOKEN": "<PROXY_API_KEY>",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5"
+  }
+}
+```
+
 ## Reverse-Proxy Forwarding Mode
 
 The gateway can forward all 4 providers to a **pool** of one or more remote upstream gateways instead of using this Repl's local Replit AI Integration keys. Configure in admin portal → Configuration → "Upstream Reverse Proxy Pool".
@@ -177,6 +280,9 @@ On startup, `initSettings()` and `initModels()` load from the database into an i
 ## Features
 
 - OpenAI-compatible interface for all 4 providers
+- Anthropic Messages API (`/v1/messages`) so Claude Code can use the gateway,
+  including native thinking/tool_use/cache_control passthrough and
+  `count_tokens`
 - Streaming SSE support
 - Tool calling / function calling for all providers
 - SillyTavern mode (appends "继续" to Claude requests without tools)

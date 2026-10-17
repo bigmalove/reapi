@@ -2,29 +2,14 @@ import { Router, type Request, type Response } from "express";
 import { requireAuth } from "../../lib/auth.js";
 import { resolveProvider, isModelDisabled, getDefaultModel } from "../../lib/models.js";
 import { getSettings } from "../../lib/settings.js";
-import { callOpenAI } from "../../providers/openai.js";
-import { callAnthropic } from "../../providers/anthropic.js";
-import { callGemini } from "../../providers/gemini.js";
-import { callOpenRouter } from "../../providers/openrouter.js";
+import {
+  callProvider,
+  isNodeFault,
+  MAX_ATTEMPTS,
+  MAX_ATTEMPTS_NODE_FAULT,
+} from "../../lib/providerDispatch.js";
 import { logger } from "../../lib/logger.js";
 import type { ChatCompletionRequest, StreamChunk } from "../../types.js";
-
-const MAX_ATTEMPTS = 3;
-
-// A node-level 5xx (`<Provider> error 5xx: ...`) means "this node cannot serve
-// right now", not "this request is wrong". The pool is heterogeneous — a large
-// share of nodes answer 500 while their neighbours are healthy — and each such
-// failure cools the node down and moves it to the tail of the pool, so extra
-// attempts converge on a working node instead of repeating the same one. Keep
-// the budget for every other error, where a retry would just resend the same
-// rejected request.
-const MAX_ATTEMPTS_NODE_FAULT = 6;
-
-/** Does this error come from an upstream node returning 5xx? */
-function isNodeFault(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /\berror 5\d\d\b/.test(message);
-}
 
 const router = Router();
 
@@ -91,22 +76,14 @@ router.post("/v1/chat/completions", requireAuth, async (req: Request, res: Respo
   const request: ChatCompletionRequest = { ...body, model, messages };
   const clientHeaders = extractPassthroughHeaders(req);
 
-  async function callProvider() {
-    switch (provider) {
-      case "openai":      return callOpenAI(request, clientHeaders);
-      case "anthropic":   return callAnthropic(request, clientHeaders);
-      case "gemini":      return callGemini(request, clientHeaders);
-      case "openrouter":  return callOpenRouter(request, clientHeaders);
-      default:            throw new Error("Unknown provider");
-    }
-  }
+  const dispatch = () => callProvider(provider, request, clientHeaders);
 
-  let result: Awaited<ReturnType<typeof callOpenAI>> | undefined;
+  let result: Awaited<ReturnType<typeof callProvider>> | undefined;
   let lastErr: unknown;
 
   for (let attempt = 1; ; attempt++) {
     try {
-      result = await callProvider();
+      result = await dispatch();
       break;
     } catch (err) {
       lastErr = err;
