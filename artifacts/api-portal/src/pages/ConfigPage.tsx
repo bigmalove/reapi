@@ -893,7 +893,7 @@ export default function ConfigPage() {
               key: "credential" as const,
               label: "500 空响应 · 已屏蔽",
               tone: "text-rose-400",
-              hint: "进程还在，但签不出 AI 凭证。必须重新发布该 Repl 才能恢复；6 小时后自动放回池子重试，仍坏则再次被移出。",
+              hint: "进程还在，但签不出 AI 凭证。不会自动恢复（节点每 5 小时会重新注册，但这里会拒绝它回池）：重新发布该 Repl 后，点「检测并恢复」或「重新启用」放回来。",
             },
             {
               key: "server-error-with-body" as const,

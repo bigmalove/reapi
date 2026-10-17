@@ -3,7 +3,6 @@ import {
   REPLIT_HOSTING_SHUTDOWN,
   FREE_TIER_RECOVERY_MS,
   NODE_SERVER_ERROR,
-  SERVER_ERROR_RECOVERY_MS,
 } from "./settings.js";
 import { logger } from "./logger.js";
 import { setNodeCooldown, rotateNodeToEnd } from "./providerEndpoint.js";
@@ -297,11 +296,12 @@ export function maybeDisableSelectedNode(args: {
     // nothing else flags it — and the condition is permanent until the
     // deployment is republished.
     //
-    // A 500 therefore goes straight to the disabled list on the first hit: the
-    // portal lists it, logs why, and the operator re-enables it after
-    // republishing. Leaving it in the pool as a mere cooldown would drag the
-    // node back in after 60 seconds, over and over, while sticky mode keeps
-    // handing it the next request.
+    // A 500 therefore goes straight to the disabled list on the first hit, with
+    // NO recovery time: the fault only clears when the deployment is
+    // republished, and nodes re-register every 5 hours, so any time-boxed
+    // window would quietly return a still-broken node to the pool. Recovery is
+    // an authenticated action — the portal's "重新启用", or "检测并恢复" which
+    // probes every disabled node before restoring it.
     //
     // Only 500 is treated this way. Other 5xx codes are left on the existing
     // cooldown path: 502/503/504 usually mean the node or the edge is briefly
@@ -315,7 +315,6 @@ export function maybeDisableSelectedNode(args: {
           nodeUrl: endpoint.nodeUrl,
           upstreamStatus: responseStatus,
           bodyLength: responseBody.length,
-          recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
         },
         "upstream node returned 500 — removing node from pool",
       );
@@ -325,7 +324,6 @@ export function maybeDisableSelectedNode(args: {
         upstreamReason: NODE_SERVER_ERROR,
         upstreamStatus: responseStatus,
         lastError,
-        recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
       });
       return;
     }

@@ -7,7 +7,6 @@ import {
   REPLIT_HOSTING_SHUTDOWN,
   NODE_PROBE_OFFLINE,
   NODE_SERVER_ERROR,
-  SERVER_ERROR_RECOVERY_MS,
   FREE_TIER_RECOVERY_MS,
   type DisabledUpstreamNode,
   type UpstreamNodeType,
@@ -369,14 +368,15 @@ router.post("/api/upstream-nodes/check-ai", requireAuth, async (_req, res) => {
         { nodeUrl: r.url, upstreamStatus: r.status },
         "upstream node cannot obtain an AI credential in AI check — removing node from pool",
       );
+      // No recoverAt: nodes re-register every 5 hours, so a time-boxed window
+      // would let a still-broken node back in. See NODE_SERVER_ERROR.
       disableUpstreamNode({
         url: r.url,
         disabledReason: "upstream-node-unavailable",
         upstreamReason: NODE_SERVER_ERROR,
         upstreamStatus: r.status,
         lastError:
-          "HTTP 500 with an empty response body — the node cannot obtain an AI credential; republish the Repl to fix it",
-        recoverAfterMs: SERVER_ERROR_RECOVERY_MS,
+          "HTTP 500 with an empty response body — the node cannot obtain an AI credential; republish the Repl, then use 检测并恢复",
       });
       disabled.push(r.url);
     } else if (kind === "quota") {
