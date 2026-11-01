@@ -84,11 +84,31 @@ export interface StreamChunk {
   object: "chat.completion.chunk";
   created: number;
   model: string;
+  /**
+   * Channel that served the request, as OpenRouter reports it on every chunk
+   * ("Wafer", "DeepSeek", "StreamLake", ...). Absent for providers that do not
+   * sit behind an upstream router.
+   */
+  provider?: string;
   choices: Array<{
     index: number;
     delta: StreamDelta;
     finish_reason: string | null;
   }>;
+  /**
+   * Token accounting reported on the final chunk (OpenAI `stream_options`
+   * shape). Anthropic/Gemini streams are normalised to this shape by the
+   * providers so the usage ledger sees one format.
+   */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number } | null;
+    completion_tokens_details?: { reasoning_tokens?: number } | null;
+  };
 }
 
 export interface ImageGenerationRequest {

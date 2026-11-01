@@ -15,18 +15,30 @@ export class UpstreamHttpError extends Error {
   readonly provider: string;
   readonly status: number;
   readonly body: string;
+  /**
+   * The failure was attributed to the pool node we sent it to (quota exhausted,
+   * forbidden, payment required…) and that node has just been dropped from the
+   * pool. The same request replayed on the next node is a different account, so
+   * it is worth retrying even though the status is a 4xx.
+   */
+  readonly nodeRetryable: boolean;
 
-  constructor(provider: string, status: number, body: string) {
+  constructor(provider: string, status: number, body: string, nodeRetryable = false) {
     super(`${provider} error ${status}: ${body}`);
     this.name = "UpstreamHttpError";
     this.provider = provider;
     this.status = status;
     this.body = body;
+    this.nodeRetryable = nodeRetryable;
   }
 
-  /** 4xx other than 429: the request itself is wrong, retrying cannot help. */
+  /**
+   * 4xx other than 429: the request itself is wrong, retrying cannot help —
+   * unless the node itself was the problem (`nodeRetryable`), in which case a
+   * 403/402 names an exhausted account rather than a malformed request.
+   */
   get isClientError(): boolean {
-    return this.status >= 400 && this.status < 500 && this.status !== 429;
+    return this.status >= 400 && this.status < 500 && this.status !== 429 && !this.nodeRetryable;
   }
 }
 

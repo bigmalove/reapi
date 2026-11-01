@@ -12,8 +12,14 @@ import {
 import {
   handleEmptyUpstreamStream,
   maybeDisableSelectedNode,
+  runWithQuotaStrikeScope,
 } from "../../lib/upstreamNodeFailure.js";
 import { asUpstreamHttpError, looksLikeUnknownModel } from "../../lib/upstreamError.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS, resolveMaxOutputTokens } from "../../lib/outputLimits.js";
+import {
+  looksLikeOutputLimitRejection,
+  shrinkOutputBudget,
+} from "../../lib/outputLimits.js";
 import {
   getModelObservations,
   recordModelObservation,
@@ -91,6 +97,10 @@ interface RelayOutcome {
   /** True once the first event reached the client. */
   started: boolean;
   events: number;
+  /** Did any content block reach the client (text / thinking / tool_use)? */
+  content: boolean;
+  /** stop_reason the upstream reported, when it reported one. */
+  stopReason: string | null;
 }
 
 /**
@@ -106,7 +116,7 @@ async function relayAnthropicStream(
   res: ExpressResponse,
   requestedModel: string,
 ): Promise<RelayOutcome> {
-  if (!upstream.body) return { started: false, events: 0 };
+  if (!upstream.body) return { started: false, events: 0, content: false, stopReason: null };
 
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
@@ -114,6 +124,8 @@ async function relayAnthropicStream(
   let started = false;
   let events = 0;
   let aborted = false;
+  let content = false;
+  let stopReason: string | null = null;
 
   const writeBlock = (raw: string): "ok" | "retry" => {
     if (aborted) return "ok";
@@ -155,6 +167,18 @@ async function relayAnthropicStream(
       }
     }
 
+    if (type === "content_block_start" || type === "content_block_delta") {
+      content = true;
+    }
+
+    if (type === "message_delta" && parsed) {
+      const delta = parsed["delta"];
+      if (delta && typeof delta === "object") {
+        const reason = (delta as Record<string, unknown>)["stop_reason"];
+        if (typeof reason === "string") stopReason = reason;
+      }
+    }
+
     if (!started) {
       setSseHeaders(res);
       started = true;
@@ -182,7 +206,7 @@ async function relayAnthropicStream(
         buffer = buffer.slice(boundary + 2);
         if (writeBlock(block) === "retry") {
           await reader.cancel().catch(() => {});
-          return { started: false, events: 0 };
+          return { started: false, events: 0, content: false, stopReason: null };
         }
         boundary = buffer.indexOf("\n\n");
       }
@@ -193,9 +217,9 @@ async function relayAnthropicStream(
     reader.releaseLock();
   }
 
-  if (aborted) return { started, events };
+  if (aborted) return { started, events, content, stopReason };
   if (started) res.end();
-  return { started, events };
+  return { started, events, content, stopReason };
 }
 
 /** Re-encode a complete Anthropic message as an SSE stream. */
@@ -267,6 +291,9 @@ interface NativeAttempt {
   /** The failure is a node-level fault, so a retry may land on a good node. */
   nodeFault: boolean;
   error?: Error;
+  /** Upstream status/body of a node-level failure, kept for the final reply. */
+  status?: number;
+  text?: string;
 }
 
 /**
@@ -350,6 +377,7 @@ async function forwardNativeOnce(args: {
 
   let response: Response | null = null;
   let failure: { status: number; text: string } | null = null;
+  let budgetRounds = 0;
 
   for (let round = 0; ; round++) {
     try {
@@ -399,21 +427,49 @@ async function forwardNativeOnce(args: {
       continue;
     }
 
+    // The gateway now defaults to the maximum output budget; a model that
+    // accepts less answers here. Halve it and replay rather than failing a
+    // request that used to work with a smaller default.
+    if (looksLikeOutputLimitRejection(response.status, text) && budgetRounds < MAX_STRIP_ROUNDS) {
+      const current =
+        typeof outbound["max_tokens"] === "number"
+          ? (outbound["max_tokens"] as number)
+          : DEFAULT_MAX_OUTPUT_TOKENS;
+      const next = Math.max(1024, Math.floor(current / 2));
+      if (next < current) {
+        budgetRounds++;
+        outbound["max_tokens"] = next;
+        logger.warn(
+          { url, model, from: current, to: next, round: round + 1 },
+          "upstream rejected the output budget — retrying with a smaller max_tokens",
+        );
+        continue;
+      }
+    }
+
     failure = { status: response.status, text };
     break;
   }
 
   if (failure) {
-    maybeDisableSelectedNode({
+    const node = maybeDisableSelectedNode({
       endpoint,
+      provider: "anthropic",
       responseStatus: failure.status,
       responseBody: failure.text,
     });
-    const nodeFault = failure.status === 429 || failure.status >= 500;
+    // A 403/402 that just evicted the node is an exhausted account, not a bad
+    // request: replaying it on the next node is the whole point of the pool.
+    // `retryElsewhere` is false when nothing else is left to try, so the quota
+    // message still reaches the client instead of becoming "not configured".
+    const nodeFault =
+      failure.status === 429 || failure.status >= 500 || node.retryElsewhere;
     if (nodeFault) {
       return {
         done: false,
         nodeFault: true,
+        status: failure.status,
+        text: failure.text,
         error: new Error(`Anthropic error ${failure.status}: ${failure.text.slice(0, 2000)}`),
       };
     }
@@ -477,6 +533,17 @@ async function forwardNativeOnce(args: {
       error: new Error("Anthropic upstream returned an empty stream"),
     };
   }
+  // Zero content with stop_reason max_tokens is the signature of a budget that
+  // was consumed before anything visible was produced (thinking tokens count
+  // against max_tokens on some models, or the relay truncated). Headers are
+  // already out, so it cannot be retried here — but it must be on the record,
+  // because the client renders it as "回答被截断" over an empty answer.
+  if (!outcome.content && outcome.stopReason === "max_tokens") {
+    logger.error(
+      { model: args.model, requestedModel, events: outcome.events },
+      "anthropic upstream produced no content but reported stop_reason=max_tokens",
+    );
+  }
   return { done: true, nodeFault: false };
 }
 
@@ -505,7 +572,16 @@ async function proxyAnthropicNative(args: {
 
   const message = last?.error?.message ?? "Anthropic upstream failed";
   if (!args.res.headersSent) {
-    args.res.status(502).json(anthropicError("api_error", message));
+    // Every node was exhausted mid-retry. Relay the last upstream status (403
+    // quota, 402, 429) so the client shows the real cause instead of a blanket
+    // 502 that reads as "the gateway is broken".
+    if (last?.status && last.text) {
+      args.res
+        .status(last.status)
+        .json(parseAnthropicErrorBody(last.text, statusToErrorType(last.status)));
+    } else {
+      args.res.status(502).json(anthropicError("api_error", message));
+    }
   } else {
     args.res.end();
   }
@@ -567,12 +643,96 @@ function relayConvertedFailure(
     return;
   }
 
+  // Retries ran out on a node-attributed 4xx (403 quota, 402): the pool had no
+  // healthy account left. Relay that status instead of 502 so the reason is
+  // visible, while staying out of the "client error" branch above, which would
+  // have skipped the retry in the first place.
+  if (upstream?.nodeRetryable) {
+    res.status(upstream.status).json(anthropicError(statusToErrorType(upstream.status), message));
+    return;
+  }
+
   if (status === 429) {
     res.status(429).json(anthropicError("rate_limit_error", message));
     return;
   }
 
   res.status(502).json(anthropicError("api_error", message));
+}
+
+// ── Stream preflight (converted path) ───────────────────────────────────────
+
+/**
+ * Ceiling for the automatic budget raise, and how many times a stream that
+ * produced nothing may be replayed with a bigger budget.
+ */
+const MAX_RAISED_MAX_TOKENS = Math.max(DEFAULT_MAX_OUTPUT_TOKENS, 64_000);
+const MAX_BUDGET_RETRIES = 2;
+
+/** Does this chunk carry anything the client can actually see? */
+function chunkHasContent(chunk: StreamChunk): boolean {
+  const choice = chunk.choices?.[0];
+  if (!choice) return false;
+  const delta = choice.delta ?? {};
+  if (typeof delta.content === "string" && delta.content.length > 0) return true;
+  if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return true;
+  // Reasoning deltas are not forwarded (the converted encoder drops them), but
+  // they still prove the stream is alive rather than finished-and-empty.
+  const reasoning =
+    (delta as Record<string, unknown>)["reasoning"] ??
+    (delta as Record<string, unknown>)["reasoning_content"];
+  return typeof reasoning === "string" && reasoning.length > 0;
+}
+
+function chunkFinishReason(chunk: StreamChunk): string | null {
+  const reason = chunk.choices?.[0]?.finish_reason;
+  return typeof reason === "string" ? reason : null;
+}
+
+/** Replay the chunks pulled during the preflight, then the rest of the stream. */
+async function* replayChunks(
+  buffered: StreamChunk[],
+  iter: AsyncIterator<StreamChunk>,
+): AsyncIterable<StreamChunk> {
+  for (const chunk of buffered) yield chunk;
+  for (;;) {
+    const { value, done } = await iter.next();
+    if (done) return;
+    if (value !== undefined) yield value;
+  }
+}
+
+interface StreamPreview {
+  /** True when a visible delta arrived; SSE headers may now be committed. */
+  hasContent: boolean;
+  buffered: StreamChunk[];
+  iter: AsyncIterator<StreamChunk>;
+  finishReason: string | null;
+}
+
+/**
+ * Pull chunks until the first visible delta arrives, or until the stream ends.
+ *
+ * Streaming answers produce their first delta almost immediately, so this adds
+ * no measurable latency. What it buys is the ability to still say "no" to an
+ * upstream that answers 200 and then produces nothing: SSE headers stay
+ * unsent, so the request can be replayed with a larger max_tokens instead of
+ * handing the client a truncated empty answer.
+ */
+async function previewConvertedStream(
+  stream: AsyncIterable<StreamChunk>,
+): Promise<StreamPreview> {
+  const iter = stream[Symbol.asyncIterator]();
+  const buffered: StreamChunk[] = [];
+  let finishReason: string | null = null;
+  for (;;) {
+    const { value, done } = await iter.next();
+    if (done) return { hasContent: false, buffered, iter, finishReason };
+    if (!value) continue;
+    buffered.push(value);
+    finishReason = chunkFinishReason(value) ?? finishReason;
+    if (chunkHasContent(value)) return { hasContent: true, buffered, iter, finishReason };
+  }
 }
 
 async function proxyConverted(args: {
@@ -592,14 +752,54 @@ async function proxyConverted(args: {
 
   const request = anthropicToOpenAIRequest(body, model);
   let result: Awaited<ReturnType<typeof callProvider>> | undefined;
+  let preview: StreamPreview | null = null;
   let lastErr: unknown;
+  let budgetRetries = 0;
 
   for (let attempt = 1; ; attempt++) {
     try {
       result = await callProvider(provider, request, clientHeaders);
+
+      if (!stream) break;
+
+      preview = await previewConvertedStream(result as AsyncIterable<StreamChunk>);
+      if (preview.hasContent) break;
+
+      // The stream ended without a single visible delta. finish_reason "length"
+      // means the budget ran out upstream — reasoning tokens count against
+      // max_tokens on thinking models — so doubling the budget is the fix, not
+      // switching nodes. Anything else is an empty answer the caller should see
+      // reported, never a fake "truncated" reply.
+      if (preview.finishReason === "length" && budgetRetries < MAX_BUDGET_RETRIES) {
+        const current = resolveMaxOutputTokens(request.max_tokens);
+        const raised = Math.min(current * 2, MAX_RAISED_MAX_TOKENS);
+        if (raised > current) {
+          budgetRetries++;
+          request.max_tokens = raised;
+          logger.warn(
+            { model, requestedModel, provider, from: current, to: raised, attempt },
+            "upstream stream ended with zero content and finish_reason=length — retrying with a larger max_tokens",
+          );
+          continue;
+        }
+      }
       break;
     } catch (err) {
       lastErr = err;
+      // The default budget is the maximum; a model that accepts less rejects the
+      // request with "max_tokens too large". Halve and replay instead of
+      // surfacing a 400 for a request that used to work.
+      const rejected = asUpstreamHttpError(err);
+      if (rejected && looksLikeOutputLimitRejection(rejected.status, rejected.body)) {
+        const shrunk = shrinkOutputBudget(request);
+        if (shrunk !== null) {
+          logger.warn(
+            { model, requestedModel, provider, to: shrunk },
+            "upstream rejected the output budget — retrying with a smaller max_tokens",
+          );
+          continue;
+        }
+      }
       // A 4xx (other than 429) names something only the caller can fix — an
       // unknown model id, a rejected parameter. Retrying sends the same
       // request to the same rejection, and reporting 502 would hide the reason.
@@ -623,10 +823,35 @@ async function proxyConverted(args: {
     return;
   }
 
+  if (preview && !preview.hasContent) {
+    // Nothing was ever written, so this is still recoverable as a clean HTTP
+    // response with a reason — instead of an empty SSE answer that clients
+    // label "已达到输出 token 上限，回答被截断" even though zero tokens of text
+    // were produced.
+    const tokens = typeof request.max_tokens === "number" ? request.max_tokens : null;
+    const detail =
+      preview.finishReason === "length"
+        ? `上游把全部 ${tokens ?? "?"} max_tokens 用完仍未产出正文（thinking 模型的思考 token 计入输出上限，或上游在生成前截断）。把 max_tokens 调大后重试，或换成非 thinking 模型。`
+        : `上游返回了空回答（finish_reason=${preview.finishReason ?? "null"}），没有任何正文内容。`;
+    logger.error(
+      { model, requestedModel, provider, finishReason: preview.finishReason, maxTokens: tokens, budgetRetries },
+      "upstream stream produced no visible content",
+    );
+    setSseHeaders(res);
+    res.write(
+      `event: error\ndata: ${JSON.stringify(anthropicError("api_error", detail))}\n\n`,
+    );
+    res.end();
+    return;
+  }
+
   setSseHeaders(res);
+  const feed = preview
+    ? replayChunks(preview.buffered, preview.iter)
+    : (result as AsyncIterable<StreamChunk>);
   try {
     await writeOpenAIStreamAsAnthropic(
-      result as AsyncIterable<StreamChunk>,
+      feed,
       (chunk) => res.write(chunk),
       requestedModel,
       estimateAnthropicInputTokens(body),
@@ -642,7 +867,11 @@ async function proxyConverted(args: {
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
-router.post("/v1/messages", anthropicAuth, async (req: Request, res: ExpressResponse) => {
+router.post("/v1/messages", anthropicAuth, (req: Request, res: ExpressResponse) =>
+  // One request = one strike id: the gateway replays a request across the pool,
+  // and those replays are one observation of a throttled node — not one strike
+  // per attempt.
+  runWithQuotaStrikeScope(async () => {
   res.setTimeout(600_000);
   req.socket.setTimeout(600_000);
 
@@ -721,7 +950,8 @@ router.post("/v1/messages", anthropicAuth, async (req: Request, res: ExpressResp
       res.end();
     }
   }
-});
+  }),
+);
 
 /**
  * Model ids Claude Code has actually sent, with where they were routed. The

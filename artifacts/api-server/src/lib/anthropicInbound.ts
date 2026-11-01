@@ -17,6 +17,7 @@ import {
   usesAdaptiveThinking,
 } from "./claudeCode.js";
 import { getModelRegistry, isModelDisabled, isThinkingVariantId } from "./models.js";
+import { resolveMaxOutputTokens } from "./outputLimits.js";
 
 /**
  * Anthropic Messages API wire types and the conversions needed to serve them
@@ -275,7 +276,7 @@ export function buildNativeAnthropicBody(
   const betas = sanitizeBetaList(body.betas);
   if (betas) out["betas"] = betas;
 
-  const maxTokens = typeof out["max_tokens"] === "number" ? out["max_tokens"] : 8192;
+  const maxTokens = resolveMaxOutputTokens(out["max_tokens"]);
   if (!opts.forCountTokens) out["max_tokens"] = maxTokens;
 
   const inbound = body.thinking;
@@ -395,7 +396,7 @@ function withThinkingVariant(model: string, body: AnthropicMessagesBody): string
   const requested = body.thinking?.type === "enabled" || body.thinking?.type === "adaptive";
   if (!requested || isThinkingVariantId(model)) return model;
 
-  const maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : 8192;
+  const maxTokens = resolveMaxOutputTokens(body.max_tokens);
   const budget =
     typeof body.thinking?.budget_tokens === "number" ? body.thinking.budget_tokens : Math.floor(maxTokens * 0.8);
   const declared = body.output_config?.["effort"];
@@ -502,7 +503,9 @@ export function anthropicToOpenAIRequest(
   const request: ChatCompletionRequest = { model: routedModel, messages };
 
   if (body.stream === true) request.stream = true;
-  if (typeof body.max_tokens === "number") request.max_tokens = body.max_tokens;
+  // Always carry a budget: downstream providers used to fall back to their own
+  // small numbers, which is what starved thinking models of visible output.
+  request.max_tokens = resolveMaxOutputTokens(body.max_tokens);
   if (typeof body.temperature === "number") request.temperature = body.temperature;
   if (typeof body.top_p === "number") request.top_p = body.top_p;
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {

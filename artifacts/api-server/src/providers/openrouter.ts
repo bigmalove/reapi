@@ -3,12 +3,80 @@ import { resolveProviderEndpoint, type ProviderEndpoint } from "../lib/providerE
 import { handleEmptyUpstreamStream, maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
 import { clampIdentityFields } from "../lib/claudeCode.js";
+import { resolveMaxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from "../lib/outputLimits.js";
 import { logger } from "../lib/logger.js";
 import {
   planSyntheticStreamShim,
   resolveShimEnabled,
   wrapSyntheticToolStream,
 } from "../lib/syntheticStreamShim.js";
+import { recordUsage, tapStreamUsage } from "../lib/usageLedger.js";
+import {
+  getSettings,
+  OPENROUTER_ROUTING_SUFFIXES,
+  hasModelVariantSuffix,
+} from "../lib/settings.js";
+
+/**
+ * Upstream-channel gate for OpenRouter.
+ *
+ * A pool node is not an account with its own budget: every node forwards to the
+ * same OpenRouter key and channel. A wrapped 429 (`quota-exhausted` with
+ * `upstreamStatus: 429`) is therefore a property of the CHANNEL, not of the node,
+ * and rotating to the next node simply re-enters the same throttling window.
+ * Concurrent agent turns make it worse — each one fans out over a fresh node and
+ * they all report the channel as dead.
+ *
+ * Requests to a throttled model now queue for a few seconds instead of fanning
+ * out, which is what makes concurrent traffic survivable. The window is capped:
+ * a channel that stays saturated must still fail fast rather than hold callers
+ * forever.
+ *
+ * Secondary gate, same reason: every waiter waking from its `setTimeout` in the
+ * same tick hits the channel together again (measured — five concurrent turns
+ * resumed within 3ms of each other). Handing out dispatch slots on a schedule
+ * keeps the burst flat instead.
+ */
+const CHANNEL_COOLDOWN_MAX_MS = 8000;
+const CHANNEL_COOLDOWN_DEFAULT_MS = 2000;
+const CHANNEL_SPACING_MS = 400;
+const channelCooldownUntil = new Map<string, number>();
+const nextDispatchAt = new Map<string, number>();
+
+async function waitForChannel(model: string): Promise<void> {
+  const now = Date.now();
+  const readyAt = Math.max(
+    now,
+    channelCooldownUntil.get(model) ?? 0,
+    nextDispatchAt.get(model) ?? 0,
+  );
+  nextDispatchAt.set(model, readyAt + CHANNEL_SPACING_MS);
+  const waitMs = readyAt - now;
+  if (waitMs <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, Math.min(waitMs, CHANNEL_COOLDOWN_MAX_MS)));
+}
+
+function markChannelThrottled(model: string, retryAfterSeconds: number | null): void {
+  const waitMs =
+    retryAfterSeconds && retryAfterSeconds > 0
+      ? Math.min(retryAfterSeconds * 1000, CHANNEL_COOLDOWN_MAX_MS)
+      : CHANNEL_COOLDOWN_DEFAULT_MS;
+  const until = Date.now() + waitMs;
+  if (until > (channelCooldownUntil.get(model) ?? 0)) channelCooldownUntil.set(model, until);
+  logger.info(
+    { model, cooldownMs: waitMs, retryAfterSeconds },
+    "openrouter channel reported throttling — queueing further dispatches to this model",
+  );
+}
+
+/**
+ * A node reports a throttled channel as HTTP 502 wrapping the upstream status,
+ * so the body — not the response status — decides.
+ */
+function isWrappedThrottle(status: number, body: string): boolean {
+  if (status !== 502 && status !== 429) return false;
+  return /"upstreamStatus"\s*:\s*429/.test(body) || body.includes("quota-exhausted");
+}
 
 // Map Bedrock/* shorthand IDs to real OpenRouter model IDs
 const BEDROCK_MODEL_MAP: Record<string, string> = {
@@ -113,6 +181,13 @@ export async function callOpenRouter(
     model: actualModel,
   };
 
+  // No client budget → hand the model the maximum. Leaving the field out made
+  // every upstream fall back to its own (small) default, which is how thinking
+  // models ended up burning the whole allowance before writing a first token.
+  if (typeof body["max_tokens"] !== "number") {
+    body["max_tokens"] = DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+
   // Claude routing. `amazon-bedrock/claude-on-aws` is not a valid OpenRouter
   // provider slug — the real endpoint tags are `amazon-bedrock`,
   // `claude-on-aws`, `anthropic`, `azure/global`, `google-vertex/…`. Pinning an
@@ -189,7 +264,7 @@ export async function callOpenRouter(
   // NOTE: Replit AI Integration proxy strips the `provider` routing field for
   // some providers (e.g. DeepSeek). OpenAI/Bedrock routing has been observed to work.
 
-  const maxTokens = (request.max_tokens as number | undefined) ?? 16000;
+  const maxTokens = resolveMaxOutputTokens(request.max_tokens);
 
   function budgetToEffort(budget: number): string {
     if (budget >= 20000) return "max";
@@ -247,6 +322,21 @@ export async function callOpenRouter(
       : "high";
     body["thinking"] = { type: "enabled" };
     body["reasoning_effort"] = effort;
+    // DeepSeek's OpenAI-style API counts reasoning tokens against `max_tokens`.
+    // A client budget that is small (or a hard task that thinks for a long time)
+    // is consumed entirely by reasoning, and the model then returns
+    // finish_reason "length" with ZERO content — which the client renders as
+    // "已达到输出 token 上限，回答被截断" over an empty answer. Leave headroom for
+    // the visible answer, mirroring what the Anthropic path already does with
+    // its budget_tokens + 1024 floor.
+    const THINKING_FLOOR = 16000;
+    if (typeof body["max_tokens"] === "number" && (body["max_tokens"] as number) < THINKING_FLOOR) {
+      logger.info(
+        { model: actualModel, from: body["max_tokens"], to: THINKING_FLOOR },
+        "deepseek thinking: raising max_tokens so reasoning cannot consume the whole budget",
+      );
+      body["max_tokens"] = THINKING_FLOOR;
+    }
   } else if (thinkingEnabled && isClaude) {
     // Legacy Claude budget_tokens thinking (pre-adaptive families).
     // OpenRouter forwards `reasoning.max_tokens` to Anthropic as budget_tokens,
@@ -293,6 +383,19 @@ export async function callOpenRouter(
   // Keep identity fields inside the 32-byte cap some upstreams enforce.
   clampIdentityFields(outboundBody as Record<string, unknown>);
 
+  // Routing tier. The suffix goes on the OUTGOING id only — `actualModel`
+  // stays bare so the price snapshot still resolves it (`…-1017:floor` is not a
+  // catalog entry) and so `usage.byModel` does not fragment per tier.
+  //
+  // Note this is the one routing control that survives a pool node: the node
+  // forwards our model string verbatim, whereas a `provider` object in the body
+  // is stripped before it reaches OpenRouter.
+  const routingTier = getSettings().openRouterRoutingTier;
+  if (routingTier !== "auto" && !hasModelVariantSuffix(actualModel)) {
+    (outboundBody as Record<string, unknown>)["model"] =
+      `${actualModel}${OPENROUTER_ROUTING_SUFFIXES[routingTier]}`;
+  }
+
   const outboundHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${apiKey}`,
@@ -314,6 +417,11 @@ export async function callOpenRouter(
     ...(clientHeaders["openai-beta"] ? { "OpenAI-Beta": clientHeaders["openai-beta"] } : {}),
   };
 
+  // Queue behind any channel that just throttled this model: whichever node we
+  // pick next forwards to that same channel, so sending immediately only adds
+  // another 429 to the pile.
+  await waitForChannel(actualModel);
+
   const response = await fetch(url, {
     method: "POST",
     headers: outboundHeaders,
@@ -322,12 +430,31 @@ export async function callOpenRouter(
 
   if (!response.ok) {
     const text = await response.text();
-    maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new UpstreamHttpError("OpenRouter", response.status, text);
+    const retryAfterHeader = Number(response.headers.get("retry-after"));
+    if (isWrappedThrottle(response.status, text)) {
+      markChannelThrottled(actualModel, Number.isFinite(retryAfterHeader) ? retryAfterHeader : null);
+    }
+    const node = maybeDisableSelectedNode({
+      endpoint,
+      provider: "openrouter",
+      responseStatus: response.status,
+      responseBody: text,
+    });
+    throw new UpstreamHttpError("OpenRouter", response.status, text, node.retryElsewhere);
   }
 
+  // Usage accounting: attribute tokens to the pool entry (account) that served
+  // the request and price them with the OpenRouter catalog. `actualModel` is
+  // the resolved id, which is what the catalog prices.
+  const usageMeta = {
+    provider: "openrouter" as const,
+    model: actualModel,
+    endpoint,
+    requestedModel: request.model,
+  };
+
   if (request.stream) {
-    const stream = parseSSEStream(response);
+    const stream = tapStreamUsage(parseSSEStream(response), usageMeta);
     if (shim) {
       logger.info(
         { model: actualModel, tool: shim.toolName },
@@ -338,7 +465,17 @@ export async function callOpenRouter(
     return ensureNonEmptyStream(stream, endpoint);
   }
 
-  return (await response.json()) as ChatCompletionResponse;
+  const data = (await response.json()) as ChatCompletionResponse;
+  // OpenRouter names the channel that actually answered ("Wafer", "DeepSeek",
+  // "Chutes", …). That is the interesting supplier; `provider` in the ledger is
+  // just this gateway's channel and reads "openrouter" for every row.
+  const channel = (data as { provider?: unknown }).provider;
+  recordUsage({
+    ...usageMeta,
+    usage: data.usage,
+    ...(typeof channel === "string" && channel.trim() ? { upstreamProvider: channel.trim() } : {}),
+  });
+  return data;
 }
 
 /**

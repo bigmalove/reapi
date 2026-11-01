@@ -26,6 +26,13 @@ export const MAX_CLAUDE_CODE_MODEL_MAP = 200;
 export interface PoolEntry {
   url: string;
   apiKey: string;
+  /**
+   * Owning account (usually the Replit login email for a dev node). Optional:
+   * plain deployments are registered by URL only, and older state has no
+   * account. Used to attribute usage buckets and blocked entries to a
+   * human-readable account instead of an opaque node URL.
+   */
+  account?: string;
 }
 
 export type UpstreamNodeType = "replit-app" | "replit-dev";
@@ -90,12 +97,73 @@ export interface DisabledUpstreamNode {
   upstreamStatus?: number;
   disabledAt?: string;
   lastError?: string;
+  /** Owning account (login email) when known — see `PoolEntry.account`. */
+  account?: string;
+  /**
+   * Verbatim (truncated) upstream response that triggered the disable.
+   * `lastError` is frequently a normalised sentence, which makes a real
+   * `FREE_TIER_BUDGET_EXCEEDED` indistinguishable from a rate limit that a pool
+   * node folded into the same envelope. Keeping the raw text is what lets the
+   * portal — and the next person debugging this — tell the two apart after the
+   * fact instead of trusting a summary.
+   */
+  rawUpstreamBody?: string;
+  /**
+   * True when the quota verdict came from a generic envelope (`status: 429` /
+   * `reason: quota-exhausted`) rather than wording that names a spend limit.
+   * The usage report uses it to separate a spent account from a transient rate
+   * limit, so a healthy node is not reported as a quota casualty.
+   */
+  quotaSignalUnverified?: boolean;
   /**
    * ISO timestamp after which the node is automatically restored to the pool.
    * Absent means the disable is permanent until re-enabled manually (or, for
    * REPLIT_HOSTING_SHUTDOWN, until the node re-registers).
    */
   recoverAt?: string;
+}
+
+/**
+ * OpenRouter routing variants. These are the only two reserved model-id
+ * suffixes OpenRouter documents; an arbitrary `:<provider>` suffix is not a
+ * routing instruction at all — it becomes part of the id and matches nothing,
+ * so the request silently falls back to default routing.
+ *
+ * Each suffix is a superset of the corresponding `provider.sort` value: it
+ * sorts candidates AND makes an extra service tier ELIGIBLE. Neither suffix
+ * pins a provider or a tier — the tier endpoint has to win the sort like any
+ * other endpoint, so "nitro" does not mean "always the priority endpoint".
+ * Verified against live traffic: `:nitro` on a DeepSeek flash model landed on
+ * the fastest default-tier endpoint 4/4 times and never on the priority one. So
+ * the suffix is a heuristic preference, and the platform must not describe it
+ * as a pin.
+ *
+ *  - `floor` → sort by price, plus `flex` tier eligible (idle capacity,
+ *    cheapest, preempted on demand). Preemption surfaces as a 429.
+ *  - `nitro` → sort by throughput, plus `priority` tier eligible (dedicated
+ *    capacity, dearer; charged only when a priority endpoint actually serves
+ *    the request).
+ */
+export type OpenRouterRoutingTier = "auto" | "floor" | "nitro";
+
+/** Suffix appended to the outgoing model id, empty for `auto`. */
+export const OPENROUTER_ROUTING_SUFFIXES: Record<OpenRouterRoutingTier, string> = {
+  auto: "",
+  floor: ":floor",
+  nitro: ":nitro",
+};
+
+/**
+ * Model ids that already carry a variant suffix, or that cannot take one.
+ * `:free` is a free-tier model variant, not a routing variant — appending
+ * another suffix would produce an id no upstream recognises.
+ */
+export function hasModelVariantSuffix(model: string): boolean {
+  return /:(?:floor|nitro|online|free|extended)$/i.test(model);
+}
+
+export function parseOpenRouterRoutingTier(raw: unknown): OpenRouterRoutingTier {
+  return raw === "floor" || raw === "nitro" ? raw : "auto";
 }
 
 export interface ServerSettings {
@@ -115,6 +183,24 @@ export interface ServerSettings {
    * (on/off) > `SYNTHETIC_STREAM_SHIM` env (on/off) > this setting (default on).
    */
   syntheticStreamShim: boolean;
+  /**
+   * Which OpenRouter routing variant to append to the outgoing model id.
+   *
+   * `auto` sends the id untouched and lets OpenRouter load-balance across every
+   * upstream that serves the model. `floor` / `nitro` append the reserved
+   * suffixes, which do two things at once: sort the candidates (by price or by
+   * throughput) *and* make an extra service tier eligible — `flex` (cheap,
+   * preemptible) for `:floor`, `priority` for `:nitro`. Eligibility is not
+   * selection: the tier endpoint competes on the same sort and only serves the
+   * request when it wins, so neither suffix pins a provider or a tier. See
+   * `OPENROUTER_ROUTING_SUFFIXES`.
+   *
+   * Only applies to the openrouter provider. Scope is deliberately global
+   * rather than per-model: the trade-off is a single knob an operator flips
+   * when the default routing starts returning 429 storms, and a per-model table
+   * would be another thing to keep in sync with the catalog.
+   */
+  openRouterRoutingTier: OpenRouterRoutingTier;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
   reverseProxyPool: PoolEntry[];
@@ -135,6 +221,7 @@ const DEFAULTS: ServerSettings = {
   sillyTavernMode: false,
   claudeCodeModelMap: {},
   syntheticStreamShim: true,
+  openRouterRoutingTier: "auto",
   reverseProxyEnabled: false,
   reverseProxyMode: "sticky",
   reverseProxyPool: [],
@@ -180,6 +267,9 @@ function normalizePool(raw: unknown): PoolEntry[] {
     out.push({
       url,
       apiKey: typeof v["apiKey"] === "string" ? v["apiKey"] : "",
+      ...(typeof v["account"] === "string" && v["account"].trim()
+        ? { account: v["account"].trim() }
+        : {}),
     });
   }
   return out;
@@ -226,11 +316,16 @@ function normalizeDisabledNodes(raw: unknown): DisabledUpstreamNode[] {
     const disabledReason: DisabledReason =
       reason === "upstream-node-unavailable" ? "upstream-node-unavailable" : "requires-wakeup";
     const entry: DisabledUpstreamNode = { url, type, disabledReason };
+    if (typeof v["account"] === "string" && v["account"].trim()) entry.account = v["account"].trim();
     if (typeof v["provider"] === "string") entry.provider = v["provider"];
     if (typeof v["upstreamReason"] === "string") entry.upstreamReason = v["upstreamReason"];
     if (typeof v["upstreamStatus"] === "number") entry.upstreamStatus = v["upstreamStatus"];
     if (typeof v["disabledAt"] === "string") entry.disabledAt = v["disabledAt"];
     if (typeof v["lastError"] === "string") entry.lastError = v["lastError"];
+    if (typeof v["rawUpstreamBody"] === "string") {
+      entry.rawUpstreamBody = v["rawUpstreamBody"].slice(0, 1000);
+    }
+    if (v["quotaSignalUnverified"] === true) entry.quotaSignalUnverified = true;
     if (typeof v["recoverAt"] === "string") entry.recoverAt = v["recoverAt"];
     // Migration: budget-exceeded nodes persisted before `recoverAt` existed were
     // disabled permanently. Backfill the recovery time from `disabledAt` so they
@@ -313,6 +408,7 @@ export async function initSettings(): Promise<void> {
       typeof loaded["syntheticStreamShim"] === "boolean"
         ? loaded["syntheticStreamShim"]
         : DEFAULTS.syntheticStreamShim,
+    openRouterRoutingTier: parseOpenRouterRoutingTier(loaded["openRouterRoutingTier"]),
     reverseProxyEnabled: typeof loaded["reverseProxyEnabled"] === "boolean" ? loaded["reverseProxyEnabled"] : DEFAULTS.reverseProxyEnabled,
     reverseProxyMode: normalizeMode(loaded["reverseProxyMode"]),
     reverseProxyPool: pool,
@@ -339,12 +435,26 @@ export function getSettings(): ServerSettings {
 export function disableUpstreamNode(args: {
   url: string;
   disabledReason: DisabledReason;
+  account?: string;
   provider?: string;
   upstreamReason?: string;
   upstreamStatus?: number;
   lastError?: string;
+  /** Verbatim upstream response, truncated. See `DisabledUpstreamNode`. */
+  rawUpstreamBody?: string;
+  /** Quota verdict came from an inferred signal, not explicit wording. */
+  quotaSignalUnverified?: boolean;
   /** When set, the node is automatically restored after this many ms. */
   recoverAfterMs?: number;
+  /**
+   * Absolute recovery time (ISO). Takes precedence over `recoverAfterMs`.
+   *
+   * The gateway cannot always derive the real reset on its own: the quota
+   * snapshot that carries the refill date belongs to the upstream account
+   * console. Without this the panel showed `disabledAt + 31d` while the real
+   * window ended weeks earlier, so one row displayed two dates far apart.
+   */
+  recoverAt?: string;
 }): void {
   const settings = getSettings();
   const url = args.url.trim().replace(/\/+$/, "");
@@ -352,20 +462,38 @@ export function disableUpstreamNode(args: {
   const type: UpstreamNodeType = isDevNodeUrl(url) ? "replit-dev" : "replit-app";
 
   // Remove from active pool
+  const removed = settings.reverseProxyPool.find((e) => e.url === url);
   const newPool = settings.reverseProxyPool.filter((e) => e.url !== url);
 
-  // Build disabled entry
+  // Build disabled entry. The account survives the move out of the pool so the
+  // blocked list (and the usage report) can name the account, not just a URL.
+  const account =
+    args.account?.trim() ||
+    removed?.account?.trim() ||
+    settings.disabledUpstreamNodes.find((e) => e.url === url)?.account?.trim() ||
+    "";
   const entry: DisabledUpstreamNode = {
     url,
     type,
     disabledReason: args.disabledReason,
     disabledAt: new Date().toISOString(),
   };
+  if (account) entry.account = account;
   if (args.provider !== undefined) entry.provider = args.provider;
   if (args.upstreamReason !== undefined) entry.upstreamReason = args.upstreamReason;
   if (args.upstreamStatus !== undefined) entry.upstreamStatus = args.upstreamStatus;
   if (args.lastError !== undefined) entry.lastError = args.lastError;
-  if (args.recoverAfterMs !== undefined) {
+  if (args.rawUpstreamBody !== undefined) {
+    entry.rawUpstreamBody = args.rawUpstreamBody.slice(0, 1000);
+  }
+  if (args.quotaSignalUnverified) entry.quotaSignalUnverified = true;
+  if (args.recoverAt !== undefined) {
+    // Absolute wins: an explicit date is a fact the caller measured, while
+    // `recoverAfterMs` is a guess.
+    const explicit = Date.parse(args.recoverAt);
+    if (!Number.isNaN(explicit)) entry.recoverAt = new Date(explicit).toISOString();
+  }
+  if (entry.recoverAt === undefined && args.recoverAfterMs !== undefined) {
     entry.recoverAt = new Date(Date.now() + args.recoverAfterMs).toISOString();
   }
 
@@ -378,10 +506,15 @@ export function disableUpstreamNode(args: {
     disabledUpstreamNodes: newDisabled,
   };
 
-  // If pool is now empty, disable the proxy (do not touch mode or overrides)
-  if (newPool.length === 0) {
-    patch.reverseProxyEnabled = false;
-  }
+  // Deliberately keep `reverseProxyEnabled` on when the pool empties. Flipping
+  // it off turned a routine drain (every node parked on a 429/quota signal) into
+  // a state indistinguishable from "the operator never configured the proxy":
+  // the next request fell through to the env fallback and failed with
+  // `Provider "<p>" is not configured…`, which read as a configuration mistake
+  // and masked the real upstream cause. Availability is derived instead:
+  // `isReverseProxyActive()` is false while the pool is empty, and
+  // `resolveProviderEndpoint()` raises `UpstreamUnavailableError` for the drain
+  // window. Only the operator turns the mode itself off.
 
   updateSettings(patch);
 }

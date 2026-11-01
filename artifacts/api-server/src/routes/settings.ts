@@ -10,6 +10,8 @@ import {
   type PoolEntry,
   type ReverseProxyMode,
   type ClaudeCodeModelMap,
+  parseOpenRouterRoutingTier,
+  type OpenRouterRoutingTier,
 } from "../lib/settings.js";
 import { requireAuth } from "../lib/auth.js";
 
@@ -41,6 +43,7 @@ interface PublicDisabledNode {
 interface PublicSettings {
   sillyTavernMode: boolean;
   syntheticStreamShim: boolean;
+  openRouterRoutingTier: OpenRouterRoutingTier;
   claudeCodeModelMap: ClaudeCodeModelMap;
   reverseProxyEnabled: boolean;
   reverseProxyMode: ReverseProxyMode;
@@ -60,6 +63,7 @@ function toPublic(s: ServerSettings): PublicSettings {
   return {
     sillyTavernMode: s.sillyTavernMode,
     syntheticStreamShim: s.syntheticStreamShim,
+    openRouterRoutingTier: s.openRouterRoutingTier,
     claudeCodeModelMap: { ...s.claudeCodeModelMap },
     reverseProxyEnabled: s.reverseProxyEnabled,
     reverseProxyMode: s.reverseProxyMode,
@@ -101,6 +105,7 @@ router.post("/api/settings", requireAuth, (req, res) => {
   const body = (req.body ?? {}) as {
     sillyTavernMode?: boolean;
     syntheticStreamShim?: boolean;
+    openRouterRoutingTier?: unknown;
     claudeCodeModelMap?: unknown;
     reverseProxyEnabled?: boolean;
     reverseProxyMode?: ReverseProxyMode;
@@ -120,6 +125,22 @@ router.post("/api/settings", requireAuth, (req, res) => {
   }
   if (typeof body.syntheticStreamShim === "boolean") {
     patch.syntheticStreamShim = body.syntheticStreamShim;
+  }
+  // Routing tier is a closed enum: an unknown value would be silently dropped by
+  // `parseOpenRouterRoutingTier`, which reads to the operator as "the save did
+  // nothing". Reject it instead so the portal can surface the real reason.
+  if (body.openRouterRoutingTier !== undefined) {
+    const raw = body.openRouterRoutingTier;
+    if (raw !== "auto" && raw !== "floor" && raw !== "nitro") {
+      res.status(400).json({
+        error: {
+          message: 'openRouterRoutingTier must be "auto", "floor" or "nitro"',
+          type: "validation_error",
+        },
+      });
+      return;
+    }
+    patch.openRouterRoutingTier = parseOpenRouterRoutingTier(raw);
   }
   // Whole-map replacement: sending `{}` clears every alias. Validation is
   // intentionally lenient (trim + cap), so a partially filled editor row is

@@ -354,6 +354,26 @@ The portal renders both the summary bar and the per-kind detail blocks from a si
 
 **Legacy compat**: PATCH `/api/settings` still accepts the old scalar `reverseProxyUrl`/`reverseProxyApiKey` and maps them onto pool[0]. Override-only legacy configs (no global URL but a global key) get the legacy key applied to every override URL that lacks its own key. GET responses expose only the new pool shape.
 
+**In-request rotation on node-level 4xx**: `maybeDisableSelectedNode()` returns `{action, retryElsewhere}`. A 403/402 whose body marks the node as exhausted (quota, `FREE_TIER_BUDGET_EXCEEDED`, `insufficient_quota`, `额度已用尽`…) evicts the node **and** the same request is replayed on the next pool entry — `/v1/messages` (native and converted), `/v1/chat/completions` and the provider layer all honour it via `UpstreamHttpError.nodeRetryable`. `retryElsewhere` is false when nothing is left to rotate to (or when the endpoint came from a per-provider override), and then the upstream 403 with its quota message is relayed unchanged instead of becoming a misleading 502.
+
+**Wrapped quota 429 is counted, not instant death**: pool nodes report an exhausted account as `HTTP 502 {"type":"upstream_node_unavailable","upstreamStatus":429,"reason":"quota-exhausted","retryable":false,"disabledCandidate":true}` — and they stamp the SAME envelope on any upstream rate limit, discarding the original body. So the wording can never separate "account is spent" from "the provider throttled us", and the gateway judges from a series instead of one response.
+
+A wrapped 429 is therefore a cooldown + rotation (`QUOTA_STRIKE_LIMIT = 8` per node inside a 10-minute window in `lib/upstreamNodeFailure.ts`); the eighth strike evicts the node with the monthly window and records `quotaSignalUnverified: true`. The unit is the **request**, not the attempt: `runWithQuotaStrikeScope()` gives every request an `AsyncLocalStorage` id (`/v1/chat/completions`, `/v1/messages`), so the gateway's own replays across the pool count as one observation. Without that, one throttled channel drained the pool in seconds — a burst of concurrent turns fanned out over different nodes and every one of them reported the channel as dead, parking accounts that had answered 200 moments earlier. A genuinely spent account still gets there in minutes, because every single request fails. Raw upstream bodies are kept on the row (`rawUpstreamBody`) so a verdict can be re-read later instead of trusting a summary.
+
+**Output budget default = maximum**: whenever the client sends no `max_tokens`, the gateway forwards **64000** (`lib/outputLimits.ts` → `DEFAULT_MAX_OUTPUT_TOKENS`), applied in `buildNativeAnthropicBody`, `anthropicToOpenAIRequest`, and the openai/gemini/openrouter provider bodies. The old 4096/8192/16000 defaults were what let thinking models consume the whole allowance before answering — the client then shows "已达到输出 token 上限，回答被截断" over an empty reply. An explicit client value is never overridden; `MAX_OUTPUT_TOKENS` env lowers the default. If a model still rejects the value (`400`/`422` "max_tokens … too large"), the request is replayed with the budget halved (`shrinkOutputBudget()`, floor 1024) on all three entry paths, so a maximum default cannot turn a previously working model into a hard error.
+
+**Zero-content answers**: a stream that ends with `stop_reason`/`finish_reason` `max_tokens` and no visible delta is not a truncated answer — nothing was produced. On the converted path the SSE headers are withheld until the first visible delta; if the stream ends first, `finish_reason: length` triggers an automatic `max_tokens` doubling (max 2 tries, ceiling 64000) before anything is committed, and a still-empty result is reported as an `error` event naming the budget. On the DeepSeek thinking branch `openrouter.ts` also raises `max_tokens` to a 16000 floor, because reasoning tokens count against that budget. Empty answers on the native Anthropic path are logged (`produced no content but reported stop_reason=max_tokens`) — headers are already committed there, so no retry is possible.
+
+**Concurrency: one OpenRouter channel, one gate**: every pool node forwards to the same OpenRouter key and channel, so a wrapped 429 is a property of the channel, not of the node — rotating to the next node re-enters the same throttling window. `providers/openrouter.ts` therefore queues dispatches per model: a throttled model is parked for 2s (capped at 8s, honouring `Retry-After` when the node sends one) and dispatches are spaced 400ms apart, because every waiter waking from its `setTimeout` in the same tick would otherwise hit the channel together again (measured: five concurrent turns resumed within 3ms of each other). Retries inside a request back off exponentially too (`min(1000 × 2^(attempt-1), 8000)` in `/v1/chat/completions` and both `/v1/messages` paths), so a retry lands after the window instead of inside it.
+
+**Pool drained ≠ misconfigured**: `disableUpstreamNode()` no longer flips `reverseProxyEnabled` off when the last node leaves. Availability is derived — `isReverseProxyActive()` is false while the pool is empty — and `resolveProviderEndpoint()` raises `UpstreamUnavailableError`, which the routes answer with **503 + `Retry-After`** and `type: "upstream_unavailable"` instead of a 502 that reads as a permanent gateway fault, or a `Provider "p" is not configured…` that hides the real upstream cause.
+
+**OpenRouter routing tier** (`openRouterRoutingTier`, portal → 配置 →「OpenRouter 路由档位」): `auto` sends the model id untouched; `floor` appends `:floor` (price sort, `flex` tier eligible); `nitro` appends `:nitro` (throughput sort, `priority` tier eligible). Only those two suffixes are reserved by OpenRouter — an arbitrary `:<provider>` suffix becomes part of the id and matches nothing. Each suffix sorts candidates *and* makes an extra service tier eligible; it pins neither a provider nor a tier (the tier endpoint still has to win the same sort), so the UI must not call it a pin. The suffix goes on the outgoing id only: the bare `actualModel` stays the pricing key and the `usage.byModel` key. This is also the one routing control that survives a pool node — a `provider` object in the body is stripped before it reaches OpenRouter, the model string is forwarded verbatim. A model id that already carries `:free|:floor|:nitro|:online|:extended` is left alone (`hasModelVariantSuffix()`); PATCH validates the enum and answers 400 on anything else.
+
+**Usage accounting** (`/api/usage`, portal tab「用量统计」): `lib/usageLedger.ts` records the token usage each provider reports, attributes it to the pool entry that served the request, prices it with the OpenRouter `/models` catalog, and aggregates it into hourly buckets (45-day retention, ≤40k buckets, debounced flush; `usage_ledger_v1` + `openrouter_prices_v1` in `kv_store`). Streams are tapped (`tapStreamUsage()`) so the final-chunk `usage` and OpenRouter's per-chunk `provider` (the channel that actually served it — "Wafer", "DeepSeek", …) are captured; non-streaming replies are recorded directly. Cost prefers the upstream-reported `usage.cost` and falls back to the catalog estimate, keeping both figures apart (`upstreamCostUsd` vs `estimatedCostUsd`) plus a `pricedRequests/unpricedRequests` split; a request that reports no usage at all is counted in `coverage.missingUsage` instead of looking like free traffic. `GET /api/usage?window=24h|7d|30d|all` returns totals, byProvider/byAccount/byModel (with per-channel breakdown), daily series, recent calls, blocked-pool state and price-snapshot metadata; `POST /api/usage/refresh-prices` and `POST /api/usage/reset` are the portal's two actions. Blocked rows with a 403 budget body are counted as `blocked-quota`; an inferred (strike-counted) park shows as `blocked-suspect` instead of inflating the casualty count.
+
+**Disabled-node sweep**: `restoreExpiredDisabledNodes()` also runs at boot and every 60s (`index.ts`), so a quiet gateway cannot hold rows past their window while the panel keeps rendering a stale badge.
+
 ## Persistence
 
 PostgreSQL 16 (Replit managed). All data is stored in a single `kv_store` table:
@@ -370,6 +390,8 @@ Keys stored:
 - `server_settings.json` — gateway settings (sillyTavernMode, reverseProxyEnabled, reverseProxyMode, reverseProxyPool[], disabledUpstreamNodes[], providerOverrides)
 - `disabled_models.json` — list of disabled model IDs
 - `custom_models.json` — operator-added models (`{id, provider, created}`), e.g. pulled from OpenRouter
+- `usage_ledger_v1` — hourly usage buckets + recent calls + coverage counters (`lib/usageLedger.ts`)
+- `openrouter_prices_v1` — persisted OpenRouter price snapshot, so costs survive a restart while the catalog is unreachable
 
 On startup, `initSettings()` and `initModels()` load from the database into an in-memory cache. All writes go to the database immediately via `writeJsonAsync`. Data survives restarts and deployments.
 
@@ -389,8 +411,11 @@ On startup, `initSettings()` and `initModels()` load from the database into an i
 
 ## Admin Portal
 
-3 tabs:
-1. **Configuration** — Base URL, gateway API key, provider status, SillyTavern toggle
+4 tabs:
+1. **Configuration** — Base URL, gateway API key, provider status, SillyTavern toggle,
+   OpenRouter routing tier, Claude Code model mapping
 2. **Model Management** — Per-provider enable/disable with bulk controls, plus an
    "添加 OpenRouter 模型" panel (remote catalog → search → multi-select → add / delete)
-3. **API Docs** — Authentication, endpoint reference, code examples
+3. **Usage** — totals, per-model cost (OpenRouter catalog prices), per-account and
+   per-channel breakdown, daily series, recent calls, blocked-pool view, price refresh / ledger reset
+4. **API Docs** — Authentication, endpoint reference, code examples

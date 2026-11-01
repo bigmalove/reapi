@@ -43,9 +43,17 @@ export interface DisabledUpstreamNode {
   recoverAt?: string;
 }
 
+export type OpenRouterRoutingTier = "auto" | "floor" | "nitro";
+
 export interface Settings {
   sillyTavernMode: boolean;
   syntheticStreamShim: boolean;
+  /**
+   * OpenRouter routing variant appended to the outgoing model id.
+   * `auto` = untouched; `floor` = price sort + flex tier eligible;
+   * `nitro` = throughput sort + priority tier eligible. Neither pins a provider.
+   */
+  openRouterRoutingTier: OpenRouterRoutingTier;
   /** Claude Code client model id → gateway model id. */
   claudeCodeModelMap: Record<string, string>;
   reverseProxyEnabled: boolean;
@@ -70,6 +78,7 @@ export interface PoolEntryPatch {
 export interface SettingsPatch {
   sillyTavernMode?: boolean;
   syntheticStreamShim?: boolean;
+  openRouterRoutingTier?: OpenRouterRoutingTier;
   /** Whole-map replacement; `{}` clears every alias. */
   claudeCodeModelMap?: Record<string, string>;
   reverseProxyEnabled?: boolean;
@@ -468,5 +477,163 @@ export async function fetchUpstreamNodesFrom(masterUrl: string, apiKey?: string)
     try { msg = JSON.parse(msg)?.error?.message ?? msg; } catch {}
     throw new Error(msg);
   }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Usage accounting
+// ---------------------------------------------------------------------------
+//
+// 直接追加到 reapi-main/artifacts/api-portal/src/lib/api.ts 的**文件末尾**。
+// 后端已具备同形接口（api-server/src/routes/usage.ts 提供 GET /api/usage、
+// POST /api/usage/refresh-prices、POST /api/usage/reset），本块只补前端类型与
+// fetch 封装；`API_BASE` / `authHeaders()` / `errorMessage()` 都是 main 现有
+// 私有符号，风格与文件内其他函数一致（同目录、同 base URL 处理，均为 "/api"）。
+
+export type UsageWindow = "24h" | "7d" | "30d" | "all";
+
+export interface UsageTotals {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  costUsd: number;
+  /** Cost the upstream itself reported (preferred over the catalog estimate). */
+  upstreamCostUsd: number;
+  upstreamCostRequests: number;
+  /** What the catalog price would have charged for the same tokens. */
+  estimatedCostUsd: number;
+  pricedRequests: number;
+  unpricedRequests: number;
+}
+
+export interface UsageAccountRow extends UsageTotals {
+  key: string;
+  account?: string;
+  nodeUrls: string[];
+  firstUsedAt?: number;
+  lastUsedAt?: number;
+  sharePct: number;
+  status: "active" | "blocked-quota" | "blocked-suspect" | "blocked" | "wakeup" | "inactive";
+  blocked?: {
+    disabledAt?: string;
+    disabledReason: string;
+    upstreamReason?: string;
+    upstreamStatus?: number;
+    recoverAt?: string;
+    lastError?: string;
+    /** Quota verdict rests on an inferred signal — a short, re-probeable park. */
+    quotaSignalUnverified?: boolean;
+  };
+}
+
+/** One OpenRouter channel's slice of a model's traffic. */
+export interface UsageChannelRow {
+  /** Channel name exactly as OpenRouter reported it ("Wafer", "DeepSeek", …). */
+  name: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  sharePct: number;
+}
+
+export interface UsageModelRow extends UsageTotals {
+  provider: ProviderName;
+  model: string;
+  priced: boolean;
+  promptPricePerM: number | null;
+  completionPricePerM: number | null;
+  sharePct: number;
+  avgCostPerRequest: number | null;
+  /** Channels (OpenRouter providers) that served this model, busiest first. */
+  channels: UsageChannelRow[];
+}
+
+export interface UsageProviderRow extends UsageTotals {
+  provider: ProviderName;
+  sharePct: number;
+}
+
+export interface UsageDailyRow extends UsageTotals {
+  date: string;
+}
+
+export interface UsageRecentEvent {
+  ts: number;
+  /** Gateway channel (openrouter / openai / anthropic / gemini). */
+  provider: ProviderName;
+  model: string;
+  /** OpenRouter-reported channel that actually served this request. */
+  upstreamProvider?: string;
+  account?: string;
+  promptTokens: number;
+  completionTokens: number;
+  costUsd: number | null;
+}
+
+export interface UsageReport {
+  window: UsageWindow;
+  since: number;
+  generatedAt: number;
+  totals: UsageTotals;
+  byProvider: UsageProviderRow[];
+  byAccount: UsageAccountRow[];
+  byModel: UsageModelRow[];
+  daily: UsageDailyRow[];
+  recent: UsageRecentEvent[];
+  coverage: {
+    measuredRequests: number;
+    missingUsage: Record<string, number>;
+    missingTotal: number;
+  };
+  pricing: {
+    source: string | null;
+    fetchedAt: number | null;
+    models: number;
+    currency: "USD";
+  };
+  pool: {
+    size: number;
+    mode: string;
+    enabled: boolean;
+    blockedQuota: number;
+    blockedTotal: number;
+  };
+  /**
+   * Fleet-level inventory slot. This gateway has none — the server always sends
+   * `null` (`lib/usageLedger.ts`). Kept optional so the shape stays stable.
+   */
+  fleet?: null;
+}
+
+export async function fetchUsageReport(window: UsageWindow = "7d"): Promise<UsageReport> {
+  const res = await fetch(`${API_BASE}/usage?window=${window}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
+export async function refreshUsagePrices(): Promise<{
+  refreshed: boolean;
+  source: string | null;
+  fetchedAt: number | null;
+  models: number;
+}> {
+  const res = await fetch(`${API_BASE}/usage/refresh-prices`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
+export async function resetUsageLedger(): Promise<{ reset: boolean }> {
+  const res = await fetch(`${API_BASE}/usage/reset`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
   return res.json();
 }

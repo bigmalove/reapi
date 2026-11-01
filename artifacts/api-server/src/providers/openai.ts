@@ -3,6 +3,8 @@ import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
 import { clampIdentityFields } from "../lib/claudeCode.js";
+import { resolveMaxOutputTokens } from "../lib/outputLimits.js";
+import { recordUsage, tapStreamUsage } from "../lib/usageLedger.js";
 
 // Models that behave like reasoning models (use max_completion_tokens, no temperature/top_p)
 const REASONING_MODELS = new Set(["gpt-5.5"]);
@@ -68,13 +70,17 @@ export async function callOpenAI(
     top_logprobs?: number;
   };
 
+  // No client budget → give the model the maximum (reasoning tokens are billed
+  // against the same allowance on reasoning models).
+  const outputBudget = resolveMaxOutputTokens(max_tokens);
+
   const resolvedRequest: Record<string, unknown> = {
     ...restRequest,
     model: baseModel,
     ...(isReasoningModel
-      ? { ...(max_tokens !== undefined ? { max_completion_tokens: max_tokens } : {}) }
+      ? { max_completion_tokens: outputBudget }
       : {
-          ...(max_tokens !== undefined ? { max_tokens } : {}),
+          max_tokens: outputBudget,
           ...(temperature !== undefined ? { temperature } : {}),
           ...(top_p !== undefined ? { top_p } : {}),
           ...(presence_penalty !== undefined ? { presence_penalty } : {}),
@@ -114,15 +120,29 @@ export async function callOpenAI(
 
   if (!response.ok) {
     const text = await response.text();
-    maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new UpstreamHttpError("OpenAI", response.status, text);
+    const node = maybeDisableSelectedNode({
+      endpoint,
+      provider: "openai",
+      responseStatus: response.status,
+      responseBody: text,
+    });
+    throw new UpstreamHttpError("OpenAI", response.status, text, node.retryElsewhere);
   }
+
+  const usageMeta = {
+    provider: "openai" as const,
+    model: baseModel,
+    endpoint,
+    requestedModel: request.model,
+  };
 
   if (request.stream) {
-    return parseSSEStream(response);
+    return tapStreamUsage(parseSSEStream(response), usageMeta);
   }
 
-  return (await response.json()) as ChatCompletionResponse;
+  const data = (await response.json()) as ChatCompletionResponse;
+  recordUsage({ ...usageMeta, usage: data.usage });
+  return data;
 }
 
 async function* parseSSEStream(response: Response): AsyncIterable<StreamChunk> {

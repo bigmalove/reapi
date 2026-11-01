@@ -1,6 +1,8 @@
 import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "../lib/outputLimits.js";
+import { recordUsage, tapStreamUsage } from "../lib/usageLedger.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -16,6 +18,14 @@ interface GeminiContent {
 
 interface GeminiPart {
   text?: string;
+  inlineData?: {
+    mimeType: string;
+    data: string;
+  };
+  fileData?: {
+    fileUri: string;
+    mimeType?: string;
+  };
   functionCall?: {
     name: string;
     args: Record<string, unknown>;
@@ -49,7 +59,68 @@ interface GeminiResponse {
     promptTokenCount: number;
     candidatesTokenCount: number;
     totalTokenCount: number;
+    cachedContentTokenCount?: number;
   };
+}
+
+const DATA_URL_PATTERN = /^data:([^;,]+);base64,([\s\S]*)$/;
+const DEFAULT_IMAGE_MEDIA_TYPE = "image/png";
+
+/** Read the URL out of an OpenAI `image_url` part, accepting both shapes. */
+function imageUrlOf(part: Record<string, unknown>): string {
+  const imageUrl = part["image_url"];
+  if (typeof imageUrl === "string") return imageUrl;
+  if (typeof imageUrl === "object" && imageUrl !== null) {
+    const url = (imageUrl as { url?: unknown }).url;
+    if (typeof url === "string") return url;
+  }
+  return "";
+}
+
+/**
+ * Translate one OpenAI `image_url` content part into a Gemini image part.
+ * Inline `data:` URLs become `inlineData`; http(s) links become `fileData`,
+ * which Gemini fetches itself. Anything else is not an image this gateway can
+ * forward and is dropped instead of being echoed back as empty text.
+ */
+function geminiPartFromContentPart(part: Record<string, unknown>): GeminiPart | null {
+  if (part["type"] !== "image_url") return null;
+  const url = imageUrlOf(part);
+  if (url === "") return null;
+
+  const dataUrl = DATA_URL_PATTERN.exec(url);
+  if (dataUrl !== null) {
+    const data = dataUrl[2].replace(/\s+/g, "");
+    if (data === "") return null;
+    return {
+      inlineData: {
+        mimeType: dataUrl[1] || DEFAULT_IMAGE_MEDIA_TYPE,
+        data,
+      },
+    };
+  }
+
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    return { fileData: { fileUri: url } };
+  }
+
+  return null;
+}
+
+/**
+ * Plain text of a message content value. OpenAI clients may send a string or an
+ * array of parts; only the text parts belong in a system instruction, a tool
+ * result or a model turn.
+ */
+function textContentOf(content: Message["content"]): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  let text = "";
+  for (const raw of content as unknown[]) {
+    const part = raw as Record<string, unknown>;
+    if (typeof part["text"] === "string") text += part["text"];
+  }
+  return text;
 }
 
 function convertMessagesToGemini(messages: Message[]): {
@@ -61,16 +132,32 @@ function convertMessagesToGemini(messages: Message[]): {
 
   for (const m of messages) {
     if (m.role === "system") {
-      systemInstruction = typeof m.content === "string" ? m.content : "";
+      systemInstruction = textContentOf(m.content);
       continue;
     }
     if (m.role === "user") {
-      const text = typeof m.content === "string" ? m.content : "";
-      contents.push({ role: "user", parts: [{ text }] });
+      if (typeof m.content === "string") {
+        contents.push({ role: "user", parts: [{ text: m.content }] });
+      } else {
+        const parts: GeminiPart[] = [];
+        for (const raw of (m.content ?? []) as unknown[]) {
+          const p = raw as Record<string, unknown>;
+          const image = geminiPartFromContentPart(p);
+          if (image !== null) {
+            parts.push(image);
+            continue;
+          }
+          const text = typeof p.text === "string" ? p.text : "";
+          if (text !== "") parts.push({ text });
+        }
+        if (parts.length === 0) parts.push({ text: "" });
+        contents.push({ role: "user", parts });
+      }
     } else if (m.role === "assistant") {
       const parts: GeminiPart[] = [];
-      if (m.content) {
-        parts.push({ text: typeof m.content === "string" ? m.content : "" });
+      const assistantText = textContentOf(m.content);
+      if (assistantText !== "") {
+        parts.push({ text: assistantText });
       }
       if (m.tool_calls) {
         for (const tc of m.tool_calls) {
@@ -85,7 +172,7 @@ function convertMessagesToGemini(messages: Message[]): {
       }
       contents.push({ role: "model", parts });
     } else if (m.role === "tool") {
-      const text = typeof m.content === "string" ? m.content : "";
+      const text = textContentOf(m.content);
       let parsed: unknown;
       try {
         parsed = JSON.parse(text);
@@ -290,7 +377,9 @@ export async function callGemini(
     ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
     generationConfig: {
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-      ...(request.max_tokens !== undefined ? { maxOutputTokens: request.max_tokens } : {}),
+      ...(request.max_tokens !== undefined
+        ? { maxOutputTokens: request.max_tokens }
+        : { maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS }),
       ...(request.top_p !== undefined ? { topP: request.top_p } : {}),
       ...(extra.top_k !== undefined ? { topK: extra.top_k } : {}),
       ...(stopSequences ? { stopSequences } : {}),
@@ -322,15 +411,28 @@ export async function callGemini(
 
   if (!response.ok) {
     const text = await response.text();
-    maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new UpstreamHttpError("Gemini", response.status, text);
+    const node = maybeDisableSelectedNode({
+      endpoint,
+      provider: "gemini",
+      responseStatus: response.status,
+      responseBody: text,
+    });
+    throw new UpstreamHttpError("Gemini", response.status, text, node.retryElsewhere);
   }
 
+  const usageMeta = {
+    provider: "gemini" as const,
+    model: actualModelId,
+    endpoint,
+    requestedModel: request.model,
+  };
+
   if (request.stream) {
-    return parseGeminiStream(response, request.model);
+    return tapStreamUsage(parseGeminiStream(response, request.model), usageMeta);
   }
 
   const data = (await response.json()) as GeminiResponse;
+  recordUsage({ ...usageMeta, usage: data.usageMetadata });
   return buildOpenAIResponse(data, request.model);
 }
 
@@ -343,6 +445,9 @@ async function* parseGeminiStream(response: Response, requestModel: string): Asy
   let buffer = "";
   const id = `chatcmpl-gemini-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
+  // Gemini attaches usageMetadata to (at least) the final chunk; keep the last
+  // one so the ledger gets the totals once the stream drains.
+  let usageTotal: GeminiResponse["usageMetadata"] | undefined;
 
   function* processLine(line: string): Iterable<StreamChunk> {
     if (!line.startsWith("data: ")) return;
@@ -350,6 +455,7 @@ async function* parseGeminiStream(response: Response, requestModel: string): Asy
     if (data === "[DONE]") return;
     try {
       const geminiResp = JSON.parse(data) as GeminiResponse;
+      if (geminiResp.usageMetadata) usageTotal = geminiResp.usageMetadata;
       const candidates = geminiResp.candidates ?? [];
       for (const candidate of candidates) {
         const parts = candidate.content?.parts ?? [];
@@ -436,6 +542,24 @@ async function* parseGeminiStream(response: Response, requestModel: string): Asy
     buffer += decoder.decode();
     if (buffer.trim()) {
       yield* processLine(buffer);
+    }
+    // One usage-only chunk so the gateway ledger records real token counts.
+    if (usageTotal) {
+      yield {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: requestModel,
+        choices: [],
+        usage: {
+          prompt_tokens: usageTotal.promptTokenCount ?? 0,
+          completion_tokens: usageTotal.candidatesTokenCount ?? 0,
+          total_tokens: usageTotal.totalTokenCount ?? 0,
+          ...(usageTotal.cachedContentTokenCount
+            ? { prompt_tokens_details: { cached_tokens: usageTotal.cachedContentTokenCount } }
+            : {}),
+        },
+      };
     }
   } catch (err) {
     throw new Error(`Gemini stream error: ${err instanceof Error ? err.message : String(err)}`);

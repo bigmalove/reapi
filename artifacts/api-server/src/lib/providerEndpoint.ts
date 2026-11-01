@@ -12,6 +12,52 @@ export interface ProviderEndpoint {
   upstreamIndex?: number; // 0-based pool index when source === "upstream"
   poolSize?: number;
   nodeUrl?: string; // raw pool entry URL (no /modelfarm suffix), set when source === "upstream"
+  /** Owning account for the selected pool entry (used by usage accounting). */
+  account?: string;
+}
+
+/**
+ * Reverse-proxy mode is on, but there is nothing to forward to right now: every
+ * pool node is parked (rate-limit cooldown, quota window), no per-provider
+ * override is set, and no local-env credentials exist.
+ *
+ * This is a *temporary availability* problem, not a configuration mistake. It
+ * used to be reported as `Provider "<p>" is not configured…` because
+ * `disableUpstreamNode` switched the proxy off when the last node left the
+ * pool, which made a routine drain look like an operator error and hid the real
+ * upstream cause (a 429 wrapped as `quota-exhausted`). Routes answer this with
+ * 503 + `Retry-After` so clients back off instead of treating it as fatal.
+ */
+export class UpstreamUnavailableError extends Error {
+  readonly provider: ProviderName;
+  readonly parkedNodes: number;
+  readonly retryAfterSeconds: number;
+
+  constructor(provider: ProviderName, parkedNodes: number, retryAfterSeconds = 20) {
+    super(
+      `No upstream node is available for "${provider}": the reverse-proxy pool is empty ` +
+        `(${parkedNodes} node(s) parked after upstream rate-limit/quota failures) and no ` +
+        `provider override is set. The pool is refilled automatically — retry in about ` +
+        `${retryAfterSeconds}s.`,
+    );
+    this.name = "UpstreamUnavailableError";
+    this.provider = provider;
+    this.parkedNodes = parkedNodes;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/** Narrow an unknown thrown value, tolerating a duplicated module instance. */
+export function asUpstreamUnavailableError(err: unknown): UpstreamUnavailableError | null {
+  if (err instanceof UpstreamUnavailableError) return err;
+  if (
+    err instanceof Error &&
+    err.name === "UpstreamUnavailableError" &&
+    typeof (err as Partial<UpstreamUnavailableError>).retryAfterSeconds === "number"
+  ) {
+    return err as UpstreamUnavailableError;
+  }
+  return null;
 }
 
 const ENV_BY_PROVIDER: Record<ProviderName, { baseUrl: string; apiKey: string }> = {
@@ -186,6 +232,7 @@ export function resolveProviderEndpoint(provider: ProviderName): ProviderEndpoin
         upstreamIndex: idx,
         poolSize,
         nodeUrl: entry.url,
+        ...(entry.account ? { account: entry.account } : {}),
       };
     }
   }
@@ -193,12 +240,22 @@ export function resolveProviderEndpoint(provider: ProviderName): ProviderEndpoin
   const envKeys = ENV_BY_PROVIDER[provider];
   const baseUrl = process.env[envKeys.baseUrl];
   const apiKey = process.env[envKeys.apiKey];
-  if (!baseUrl || !apiKey) {
-    throw new Error(
-      `Provider "${provider}" is not configured. Either set ${envKeys.baseUrl} and ${envKeys.apiKey}, or enable reverse-proxy mode in the admin portal.`,
-    );
+  if (baseUrl && apiKey) {
+    return { baseUrl, apiKey, source: "local-env" };
   }
-  return { baseUrl, apiKey, source: "local-env" };
+
+  // Reverse-proxy mode is on, yet there is no pool entry, no override and no
+  // env credential. That is the normal shape of a drain: the last node was just
+  // parked after a 429/quota failure and a replacement needs a few seconds.
+  // Report it as transient unavailability so the caller retries, instead of the
+  // misleading "not configured" error below.
+  if (settings.reverseProxyEnabled) {
+    throw new UpstreamUnavailableError(provider, settings.disabledUpstreamNodes.length);
+  }
+
+  throw new Error(
+    `Provider "${provider}" is not configured. Either set ${envKeys.baseUrl} and ${envKeys.apiKey}, or enable reverse-proxy mode in the admin portal.`,
+  );
 }
 
 export function isReverseProxyActive(): boolean {
@@ -206,6 +263,22 @@ export function isReverseProxyActive(): boolean {
   if (!s.reverseProxyEnabled) return false;
   if (s.reverseProxyPool.length > 0) return true;
   return Object.values(s.providerOverrides).some((o) => !!o.url);
+}
+
+/**
+ * Can this provider still be served after the node we just used was dropped?
+ *
+ * Used to decide whether a node-level failure is worth replaying: a retry only
+ * helps while another pool entry (or an override) remains. When the last node
+ * was just disabled the pool is empty for the drain window, and a retry would
+ * either hit the local env fallback or throw `UpstreamUnavailableError` —
+ * hiding the real quota message the client needs to see.
+ */
+export function hasUsableUpstreamEndpoint(provider: ProviderName): boolean {
+  const settings = getSettings();
+  if (!settings.reverseProxyEnabled) return false;
+  if (settings.providerOverrides[provider].url.trim()) return true;
+  return settings.reverseProxyPool.length > 0;
 }
 
 /**

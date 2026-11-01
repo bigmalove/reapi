@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { requireAuth } from "../../lib/auth.js";
 import { resolveProvider, isModelDisabled } from "../../lib/models.js";
-import { resolveProviderEndpoint } from "../../lib/providerEndpoint.js";
+import { resolveProviderEndpoint, asUpstreamUnavailableError, type ProviderEndpoint } from "../../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../../lib/upstreamNodeFailure.js";
 import type { ImageGenerationRequest, ImageGenerationResponse } from "../../types.js";
 
@@ -41,7 +41,21 @@ router.post("/v1/images/generations", requireAuth, async (req: Request, res: Res
     return;
   }
 
-  const endpoint = resolveProviderEndpoint("openrouter");
+  let endpoint: ProviderEndpoint;
+  try {
+    endpoint = resolveProviderEndpoint("openrouter");
+  } catch (err) {
+    // The pool is momentarily empty — every node is parked after an upstream
+    // failure. Answer 503 with a Retry-After rather than letting the error
+    // escape as an unhandled 500.
+    const unavailable = asUpstreamUnavailableError(err);
+    if (unavailable) {
+      res.setHeader("Retry-After", String(unavailable.retryAfterSeconds));
+      res.status(503).json({ error: { message: unavailable.message, type: "upstream_unavailable" } });
+      return;
+    }
+    throw err;
+  }
   const { baseUrl, apiKey } = endpoint;
   const url = `${baseUrl}/images/generations`;
 
@@ -59,7 +73,12 @@ router.post("/v1/images/generations", requireAuth, async (req: Request, res: Res
 
     if (!response.ok) {
       const text = await response.text();
-      maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
+      maybeDisableSelectedNode({
+        endpoint,
+        provider: "openrouter",
+        responseStatus: response.status,
+        responseBody: text,
+      });
       req.log.error({ status: response.status, body: text }, "Image generation error");
       res.status(502).json({ error: { message: `Upstream error ${response.status}: ${text}`, type: "upstream_error" } });
       return;

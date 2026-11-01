@@ -1,18 +1,33 @@
 import {
   disableUpstreamNode,
+  getSettings,
   REPLIT_HOSTING_SHUTDOWN,
   FREE_TIER_RECOVERY_MS,
   NODE_SERVER_ERROR,
 } from "./settings.js";
 import { logger } from "./logger.js";
-import { setNodeCooldown, rotateNodeToEnd } from "./providerEndpoint.js";
-import type { ProviderEndpoint } from "./providerEndpoint.js";
+import {
+  getActiveCooldowns,
+  hasUsableUpstreamEndpoint,
+  setNodeCooldown,
+  rotateNodeToEnd,
+} from "./providerEndpoint.js";
+import type { ProviderEndpoint, ProviderName } from "./providerEndpoint.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 interface NodeDisableSignal {
   provider: string;
   reason: string;
   upstreamStatus?: number;
   message: string;
+  /** When set, the node comes back automatically once this window elapses. */
+  recoverAfterMs?: number;
+  /**
+   * True when the quota verdict rests on a repeated signal rather than explicit
+   * budget wording in the body. Recorded so the portal can tell a measured
+   * verdict from an inferred one.
+   */
+  unverified?: boolean;
 }
 
 type NodeSignal =
@@ -28,6 +43,17 @@ const BUDGET_EXCEEDED_PATTERNS: RegExp[] = [
   /spending limit exceeded/i,
   /budget (?:limit )?exceeded/i,
   /upgrade to a paid plan/i,
+  // The same condition in other shapes: OpenAI-style quota errors relayed by a
+  // node, and the localised body the Replit modelfarm returns to zh clients
+  // ("当前请求的额度已用尽"). Without these the node still leaves the pool, but
+  // as a generic "forbidden" with no recovery window.
+  /insufficient[_ ]quota/i,
+  /quota (?:has been )?(?:exceeded|exhausted|reached)/i,
+  /out of (?:credits?|quota)/i,
+  /credit balance/i,
+  /额度(?:已|不足|用尽|耗尽)/,
+  /配额(?:已|不足)?(?:用尽|耗尽)/,
+  /余额不足/,
 ];
 
 /**
@@ -47,6 +73,14 @@ export function detectReplitNotRunning(body: string): string | null {
   }
   if (body.includes("Run this app to see the results here")) {
     return "Replit dev workspace is not running (\"Run this app\" page returned)";
+  }
+  // Both the raw and the HTML-escaped apostrophe show up, depending on whether
+  // the page came back through a JSON-encoding hop.
+  if (
+    body.includes("This project isn't available right now") ||
+    body.includes("This project isn&#39;t available right now")
+  ) {
+    return "Replit project is not available right now (edge placeholder page returned)";
   }
   // A deleted or renamed Repl: Replit's edge never reaches an app at all, so it
   // answers with its own generic 404 page. Unlike the two placeholders above,
@@ -109,7 +143,98 @@ export function detectBudgetExceeded(body: string): { code: string; message: str
   };
 }
 
-function parseNodeSignal(status: number, body: string): NodeSignal {
+/**
+ * How many *separate requests* a single node may fail with 429 inside the
+ * strike window before the account is treated as spent.
+ *
+ * A throttled upstream channel and a spent account look identical on the wire
+ * (the pool node collapses both into the same envelope), so the gateway cannot
+ * tell them apart from one response. It can tell them apart from a series: a
+ * rate limit clears, a spent account does not.
+ *
+ * The unit is deliberately the request, not the attempt. One request replays
+ * across the pool up to six times (`MAX_ATTEMPTS_NODE_FAULT`), and in a
+ * single-node pool all six land on the same node — that is one observation of
+ * "this node is throttled", not six independent failures. Counting attempts
+ * would evict a healthy account on the very first request.
+ *
+ * Measured reason for the threshold: a single long session lands on the sticky
+ * pool head every turn, each 429 counts a strike, and at a low limit four
+ * accounts were disabled within six seconds while all of them had answered 200
+ * moments earlier. A burst of that shape needs more evidence before it costs an
+ * account its place in the pool; a genuinely spent account still gets there
+ * within minutes because every request fails.
+ */
+const QUOTA_STRIKE_LIMIT = 8;
+
+/** How long a strike stays on the books. */
+const QUOTA_STRIKE_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * nodeUrl → { count, firstAt, lastRequestId }.
+ *
+ * `lastRequestId` makes the counter request-scoped: a replay inside the same
+ * request does not add a strike, so one throttled request cannot evict a node
+ * on its own.
+ */
+const quotaStrikes = new Map<
+  string,
+  { count: number; firstAt: number; lastRequestId: string }
+>();
+
+/**
+ * Identifies the request a failure belongs to. Every attempt of one request
+ * shares it, so the strike counter only advances once per request.
+ *
+ * The id lives in an AsyncLocalStorage rather than a module variable: the
+ * gateway serves requests concurrently, so a shared "current request" would be
+ * overwritten by the next request before the first one finishes, and the two
+ * would share a strike count.
+ */
+const quotaStrikeScope = new AsyncLocalStorage<string>();
+
+let requestCounter = 0;
+
+/**
+ * Run `fn` as one request for strike-counting purposes. Every upstream attempt
+ * inside it shares a strike id, so a single throttled request cannot evict a
+ * node no matter how many times the gateway replays it.
+ */
+export function runWithQuotaStrikeScope<T>(fn: () => T): T {
+  requestCounter += 1;
+  return quotaStrikeScope.run(`req-${requestCounter}`, fn);
+}
+
+/** The strike id of the request in flight, or "" outside a scoped request. */
+export function currentQuotaStrikeRequestId(): string {
+  return quotaStrikeScope.getStore() ?? "";
+}
+
+function recordQuotaStrike(nodeUrl: string | undefined, requestId: string): number {
+  if (!nodeUrl) return QUOTA_STRIKE_LIMIT;
+  const now = Date.now();
+  const entry = quotaStrikes.get(nodeUrl);
+  if (!entry || now - entry.firstAt > QUOTA_STRIKE_WINDOW_MS) {
+    quotaStrikes.set(nodeUrl, { count: 1, firstAt: now, lastRequestId: requestId });
+    return 1;
+  }
+  // Another attempt of the same request — not an independent observation.
+  if (entry.lastRequestId === requestId) return entry.count;
+  entry.count += 1;
+  entry.lastRequestId = requestId;
+  return entry.count;
+}
+
+function clearQuotaStrikes(nodeUrl: string | undefined): void {
+  if (nodeUrl) quotaStrikes.delete(nodeUrl);
+}
+
+function parseNodeSignal(
+  status: number,
+  body: string,
+  nodeUrl?: string,
+  requestId?: string,
+): NodeSignal {
   if (status !== 502 && status !== 401) return null;
 
   let parsed: unknown;
@@ -141,22 +266,121 @@ function parseNodeSignal(status: number, body: string): NodeSignal {
     return null;
   }
 
-  // 429 from upstream means rate-limiting — temporary, not a permanent failure.
-  // Signal cooldown instead of disable.
-  if (error.upstreamStatus === 429) {
-    return { action: "cooldown", upstreamStatus: 429 };
+  const reason = typeof error.reason === "string" ? error.reason : "unknown";
+  const message = typeof error.message === "string" ? error.message : "";
+  const providerName = typeof error.provider === "string" ? error.provider : "unknown";
+  const upstreamStatus =
+    typeof error.upstreamStatus === "number" ? error.upstreamStatus : undefined;
+
+  // A wrapped 429 is the node's envelope for ANY upstream rate limit.
+  //
+  // The pool node maps every upstream 429 whose body mentions
+  // quota/credit/rate limit to `reason: "quota-exhausted"` with
+  // `disabledCandidate: true`, and it DISCARDS the original upstream body,
+  // replacing it with one generic sentence. Inside a wrapped signal the only
+  // trustworthy fields are `reason` and `upstreamStatus`; the wording can never
+  // distinguish "account is spent" from "the provider throttled us".
+  //
+  // Evicting on that signal drains the whole pool in seconds: one throttled
+  // channel makes every node answer 429 at the same moment, so a burst of
+  // concurrent requests would park accounts that were healthy moments earlier.
+  // A rate limit is transient by definition, so it earns a cooldown and a
+  // rotation — the node stays in the pool and is retried after the window.
+  //
+  // A genuinely spent account still gets evicted, but only once it repeats:
+  // strikes accumulate per node (one per request, not per attempt), and
+  // `QUOTA_STRIKE_LIMIT` inside the strike window turns the signal into a
+  // disable with the monthly recovery window.
+  if (upstreamStatus === 429) {
+    const strikes = recordQuotaStrike(nodeUrl, requestId ?? currentQuotaStrikeRequestId());
+    if (strikes < QUOTA_STRIKE_LIMIT) {
+      return { action: "cooldown", upstreamStatus: 429 };
+    }
+    clearQuotaStrikes(nodeUrl);
+    logger.warn(
+      { nodeUrl, strikes },
+      "upstream node answered 429 repeatedly — treating the account as spent",
+    );
+    return {
+      action: "disable",
+      provider: providerName,
+      reason,
+      upstreamStatus: 429,
+      message,
+      recoverAfterMs: FREE_TIER_RECOVERY_MS,
+      unverified: true,
+    };
   }
 
+  // Every other wrapped signal is a condition of the account itself: an invalid
+  // key, a revoked account, an exhausted balance. The node recognised those by
+  // their upstream status, so the verdict is the node's rather than an
+  // inference from wording.
   return {
     action: "disable",
-    provider: typeof error.provider === "string" ? error.provider : "unknown",
-    reason: typeof error.reason === "string" ? error.reason : "unknown",
-    upstreamStatus: typeof error.upstreamStatus === "number" ? error.upstreamStatus : undefined,
-    message: typeof error.message === "string" ? error.message : "",
+    provider: providerName,
+    reason,
+    upstreamStatus,
+    message,
+    ...(reason || message ? { recoverAfterMs: FREE_TIER_RECOVERY_MS } : {}),
   };
 }
 
+export type NodeFailureAction = "disabled" | "cooldown" | "none";
+
+export interface NodeFailureOutcome {
+  /** What the gateway did to the node that produced this response. */
+  action: NodeFailureAction;
+  /**
+   * Whether replaying the same request can land on a different account: true
+   * only when the node was actually taken out of rotation AND at least one
+   * other upstream endpoint is still available to serve the retry.
+   */
+  retryElsewhere: boolean;
+}
+
+/**
+ * Report a failed upstream response and take the failing node out of rotation.
+ *
+ * The old void signature made callers guess whether the failure was
+ * node-attributable, and every route guessed "no" for a 403 — so a pool whose
+ * account had run out of quota disabled that account and then handed the 403
+ * straight back to the client instead of replaying the request on the next
+ * account. Returning the outcome lets each route decide to retry with evidence
+ * instead of hard-coded status codes.
+ */
 export function maybeDisableSelectedNode(args: {
+  endpoint: ProviderEndpoint;
+  provider: ProviderName;
+  responseStatus: number;
+  responseBody: string;
+}): NodeFailureOutcome {
+  const { endpoint, provider } = args;
+  const url = endpoint.nodeUrl;
+  const poolBefore = new Set(getSettings().reverseProxyPool.map((e) => e.url));
+  const cooledForBefore = url ? (getActiveCooldowns()[url] ?? 0) : 0;
+
+  applyNodeFailure(args);
+
+  let action: NodeFailureAction = "none";
+  if (url && endpoint.source === "upstream") {
+    const stillInPool = getSettings().reverseProxyPool.some((e) => e.url === url);
+    const cooledForAfter = getActiveCooldowns()[url] ?? 0;
+    if (poolBefore.has(url) && !stillInPool) action = "disabled";
+    else if (cooledForAfter > cooledForBefore) action = "cooldown";
+  }
+
+  const retryElsewhere = action !== "none" && hasUsableUpstreamEndpoint(provider);
+  if (retryElsewhere) {
+    logger.warn(
+      { nodeUrl: url, provider, action },
+      "upstream node left rotation — replaying the request on the next node",
+    );
+  }
+  return { action, retryElsewhere };
+}
+
+function applyNodeFailure(args: {
   endpoint: ProviderEndpoint;
   responseStatus: number;
   responseBody: string;
@@ -238,6 +462,7 @@ export function maybeDisableSelectedNode(args: {
       upstreamReason: "payment_required",
       upstreamStatus: 402,
       lastError,
+      rawUpstreamBody: responseBody,
     });
     return;
   }
@@ -277,11 +502,12 @@ export function maybeDisableSelectedNode(args: {
       upstreamReason,
       upstreamStatus: 403,
       lastError,
+      rawUpstreamBody: responseBody,
     });
     return;
   }
 
-  const signal = parseNodeSignal(responseStatus, responseBody);
+  const signal = parseNodeSignal(responseStatus, responseBody, endpoint.nodeUrl);
   if (!signal) {
     // HTTP 500 with nothing but an empty body is the signature of a node whose
     // Replit AI Integration cannot mint a credential (`metasidecar: failed to
@@ -318,6 +544,7 @@ export function maybeDisableSelectedNode(args: {
         upstreamReason: NODE_SERVER_ERROR,
         upstreamStatus: responseStatus,
         lastError,
+        rawUpstreamBody: responseBody,
       });
       return;
     }
@@ -355,6 +582,7 @@ export function maybeDisableSelectedNode(args: {
       reason: signal.reason,
       upstreamStatus: signal.upstreamStatus,
       message: signal.message,
+      recoverAfterMs: signal.recoverAfterMs,
     },
     "upstream node disable signal received — removing node from pool",
   );
@@ -366,6 +594,9 @@ export function maybeDisableSelectedNode(args: {
     upstreamReason: signal.reason,
     upstreamStatus: signal.upstreamStatus,
     lastError: signal.message,
+    rawUpstreamBody: responseBody,
+    ...(signal.unverified ? { quotaSignalUnverified: true } : {}),
+    ...(signal.recoverAfterMs !== undefined ? { recoverAfterMs: signal.recoverAfterMs } : {}),
   });
 }
 

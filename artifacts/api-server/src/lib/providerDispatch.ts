@@ -1,5 +1,6 @@
 import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from "../types.js";
 import type { Provider } from "./models.js";
+import { asUpstreamHttpError } from "./upstreamError.js";
 import { callOpenAI } from "../providers/openai.js";
 import { callAnthropic } from "../providers/anthropic.js";
 import { callGemini } from "../providers/gemini.js";
@@ -24,6 +25,10 @@ export const MAX_ATTEMPTS_NODE_FAULT = 6;
 
 /** Does this error come from an upstream node returning 5xx? */
 export function isNodeFault(err: unknown): boolean {
+  // A 4xx that got the node evicted (403 quota exhausted, 402 payment required)
+  // is a node fault, not a request fault: the retry lands on another account.
+  const upstream = asUpstreamHttpError(err);
+  if (upstream?.nodeRetryable) return true;
   const message = err instanceof Error ? err.message : String(err);
   return /\berror 5\d\d\b/.test(message);
 }

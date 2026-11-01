@@ -662,6 +662,18 @@ export default function ConfigPage() {
     }
   }
 
+  async function setRoutingTier(tier: "auto" | "floor" | "nitro") {
+    if (!settings) return;
+    if ((settings.openRouterRoutingTier ?? "auto") === tier) return;
+    setSaving(true);
+    try {
+      const updated = await updateSettings({ openRouterRoutingTier: tier });
+      setSettings(updated);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="max-w-2xl space-y-6">
       <div>
@@ -1571,6 +1583,46 @@ export default function ConfigPage() {
               }`}
             />
           </button>
+        </div>
+      </div>
+
+      {/* OpenRouter routing tier */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">OpenRouter 路由档位</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            只对 openrouter 渠道生效，切换后立即作用于下一个请求，无需重启。档位以模型 id 后缀的形式下发
+            （<code className="bg-secondary/60 px-1 rounded">:floor</code> /{" "}
+            <code className="bg-secondary/60 px-1 rounded">:nitro</code>）——后缀同时做两件事：给候选端点排序，并让
+            额外的服务层级（flex / priority）变得<em>可选</em>；它并不锁定具体供应商，层级端点仍要在同一套排序里胜出才会接到请求。
+          </p>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {(
+            [
+              { id: "auto" as const, label: "自动", hint: "不加后缀，上游默认策略" },
+              { id: "floor" as const, label: ":floor", hint: "按价格排序，flex 层级可选" },
+              { id: "nitro" as const, label: ":nitro", hint: "按吞吐排序，priority 层级可选" },
+            ]
+          ).map((opt) => {
+            const active = (settings?.openRouterRoutingTier ?? "auto") === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                disabled={saving || !settings}
+                onClick={() => setRoutingTier(opt.id)}
+                className={`rounded-md border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
+                  active ? "border-primary bg-primary/10" : "border-border bg-secondary/20 hover:border-border"
+                }`}
+              >
+                <div className={`text-xs font-medium ${active ? "text-primary" : "text-foreground"}`}>
+                  {opt.label}
+                </div>
+                <div className="mt-0.5 text-[10px] leading-snug text-muted-foreground">{opt.hint}</div>
+              </button>
+            );
+          })}
         </div>
       </div>
 

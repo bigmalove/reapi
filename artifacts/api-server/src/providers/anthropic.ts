@@ -3,6 +3,8 @@ import { resolveProviderEndpoint } from "../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../lib/upstreamNodeFailure.js";
 import { UpstreamHttpError } from "../lib/upstreamError.js";
 import { clampIdentifier } from "../lib/claudeCode.js";
+import { resolveMaxOutputTokens } from "../lib/outputLimits.js";
+import { recordUsage, tapStreamUsage } from "../lib/usageLedger.js";
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -18,16 +20,22 @@ interface AnthropicMessage {
 }
 
 interface AnthropicContentBlock {
-  type: "text" | "tool_use" | "tool_result" | "thinking";
+  type: "text" | "image" | "tool_use" | "tool_result" | "thinking";
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
   text?: string;
   thinking?: string;
   tool_use_id?: string;
+  source?: AnthropicImageSource;
   content?: string | AnthropicContentBlock[];
   cache_control?: { type: "ephemeral" } | null;
 }
+
+/** An inbound image: either inline base64 or a URL Anthropic fetches itself. */
+type AnthropicImageSource =
+  | { type: "base64"; media_type: string; data: string }
+  | { type: "url"; url: string };
 
 interface AnthropicTool {
   name: string;
@@ -36,6 +44,77 @@ interface AnthropicTool {
 }
 
 type AnthropicSystemBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
+
+const DATA_URL_PATTERN = /^data:([^;,]+);base64,([\s\S]*)$/;
+const DEFAULT_IMAGE_MEDIA_TYPE = "image/png";
+
+/** Read the URL out of an OpenAI `image_url` part, accepting both shapes. */
+function imageUrlOf(part: Record<string, unknown>): string {
+  const imageUrl = part["image_url"];
+  if (typeof imageUrl === "string") return imageUrl;
+  if (typeof imageUrl === "object" && imageUrl !== null) {
+    const url = (imageUrl as { url?: unknown }).url;
+    if (typeof url === "string") return url;
+  }
+  return "";
+}
+
+/**
+ * Translate one OpenAI `image_url` content part into an Anthropic image block.
+ * Clients send either an inline `data:` URL (what harnesses and browser
+ * clients produce) or an http(s) link Anthropic fetches itself; anything else
+ * is not an image this gateway can forward, so it is dropped instead of being
+ * echoed back as empty text.
+ */
+function imageBlockFromPart(part: Record<string, unknown>): AnthropicContentBlock | null {
+  if (part["type"] !== "image_url") return null;
+  const url = imageUrlOf(part);
+  if (url === "") return null;
+
+  const dataUrl = DATA_URL_PATTERN.exec(url);
+  if (dataUrl !== null) {
+    const data = dataUrl[2].replace(/\s+/g, "");
+    if (data === "") return null;
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: dataUrl[1] || DEFAULT_IMAGE_MEDIA_TYPE,
+        data,
+      },
+    };
+  }
+
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    return { type: "image", source: { type: "url", url } };
+  }
+
+  return null;
+}
+
+/**
+ * Parse an outbound body for logging while collapsing inline image payloads:
+ * one screenshot is megabytes of base64 and would bury every other field.
+ */
+function redactImagePayloads(serializedBody: string): unknown {
+  const scrub = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      const dataUrl = DATA_URL_PATTERN.exec(value);
+      if (dataUrl === null) return value;
+      return `<${dataUrl[1] || DEFAULT_IMAGE_MEDIA_TYPE} base64, ${value.length} chars>`;
+    }
+    if (Array.isArray(value)) return value.map(scrub);
+    if (value !== null && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+        out[key] = scrub(nested);
+      }
+      return out;
+    }
+    return value;
+  };
+  return scrub(JSON.parse(serializedBody) as unknown);
+}
 
 function tagMessageForCache(message: AnthropicMessage): void {
   if (typeof message.content === "string") {
@@ -116,17 +195,24 @@ function convertMessagesToAnthropic(messages: Message[]): {
         msgs.push({ role: "user", content: m.content });
       } else {
         const rawParts = (m.content ?? []) as unknown[];
-        const blocks: AnthropicContentBlock[] = rawParts.map((raw) => {
+        const blocks: AnthropicContentBlock[] = [];
+        for (const raw of rawParts) {
           const p = raw as Record<string, unknown>;
-          return {
-            type: "text",
-            text: typeof p.text === "string" ? p.text : "",
-          };
-        });
-        if (blocks.length === 1) {
-          msgs.push({ role: "user", content: blocks[0].text ?? "" });
-        } else {
+          const image = imageBlockFromPart(p);
+          if (image !== null) {
+            blocks.push(image);
+            continue;
+          }
+          blocks.push({ type: "text", text: typeof p.text === "string" ? p.text : "" });
+        }
+        if (blocks.length === 0) {
+          msgs.push({ role: "user", content: "" });
+        } else if (blocks.every((block) => block.type === "text")) {
+          // Text-only content keeps its historical single-string shape so the
+          // cache breakpoints and upstream prompt caching stay byte-identical.
           msgs.push({ role: "user", content: blocks.map((b) => b.text ?? "").join("") });
+        } else {
+          msgs.push({ role: "user", content: blocks });
         }
       }
     } else if (m.role === "assistant") {
@@ -305,7 +391,7 @@ export async function callAnthropic(
   );
 
   // Anthropic requires budget_tokens >= 1024; ensure max_tokens is high enough.
-  const requestedMax = request.max_tokens ?? (thinkingEnabled ? 16000 : 4096);
+  const requestedMax = resolveMaxOutputTokens(request.max_tokens);
   const maxTokens = thinkingEnabled ? Math.max(requestedMax, 2048) : requestedMax;
   const thinkingBudget = thinkingEnabled ? Math.max(Math.floor(maxTokens * 0.8), 1024) : 0;
 
@@ -428,7 +514,7 @@ export async function callAnthropic(
       ...outboundHeaders,
       "x-api-key": `${apiKey.slice(0, 8)}...${apiKey.slice(-4)}`,
     },
-    body: JSON.parse(outboundBody),
+    body: redactImagePayloads(outboundBody),
   }, "Anthropic outbound request");
 
   const response = await fetch(outboundUrl, {
@@ -439,12 +525,24 @@ export async function callAnthropic(
 
   if (!response.ok) {
     const text = await response.text();
-    maybeDisableSelectedNode({ endpoint, responseStatus: response.status, responseBody: text });
-    throw new UpstreamHttpError("Anthropic", response.status, text);
+    const node = maybeDisableSelectedNode({
+      endpoint,
+      provider: "anthropic",
+      responseStatus: response.status,
+      responseBody: text,
+    });
+    throw new UpstreamHttpError("Anthropic", response.status, text, node.retryElsewhere);
   }
 
+  const usageMeta = {
+    provider: "anthropic" as const,
+    model: actualModel,
+    endpoint,
+    requestedModel: request.model,
+  };
+
   if (request.stream) {
-    return parseAnthropicStream(response, request.model);
+    return tapStreamUsage(parseAnthropicStream(response, request.model), usageMeta);
   }
 
   const data = (await response.json()) as AnthropicApiResponse;
@@ -457,6 +555,7 @@ export async function callAnthropic(
     usage: data.usage,
     contentTypes: data.content?.map(b => b.type),
   }, "Anthropic response received");
+  recordUsage({ ...usageMeta, usage: data.usage });
   return buildOpenAIResponse(data, request.model);
 }
 
@@ -476,12 +575,26 @@ async function* parseAnthropicStream(
   // State for collecting tool use blocks and thinking blocks
   const toolUseBlocks: Map<number, { id: string; name: string; inputJson: string }> = new Map();
   const thinkingBlocks: Set<number> = new Set();
+  // Anthropic reports input tokens once in `message_start` and the running
+  // output count in `message_delta`. Accumulate them so the ledger (and the
+  // OpenAI-shaped final chunk emitted below) has real numbers.
+  const usageTotals = { input: 0, output: 0, cached: 0 };
 
   function processLine(line: string): StreamChunk | null {
     if (!line.startsWith("data: ")) return null;
     const data = line.slice(6).trim();
     try {
       const event = JSON.parse(data) as AnthropicStreamEvent;
+      if (event.type === "message_start" && event.message?.usage) {
+        usageTotals.input = Math.max(usageTotals.input, event.message.usage.input_tokens ?? 0);
+        usageTotals.cached = Math.max(
+          usageTotals.cached,
+          event.message.usage.cache_read_input_tokens ?? 0,
+        );
+      }
+      if (event.type === "message_delta" && event.usage) {
+        usageTotals.output = Math.max(usageTotals.output, event.usage.output_tokens ?? 0);
+      }
       return convertAnthropicEventToChunk(event, id, created, requestModel, toolUseBlocks, thinkingBlocks);
     } catch {
       return null;
@@ -505,6 +618,26 @@ async function* parseAnthropicStream(
     if (buffer.trim()) {
       const chunk = processLine(buffer);
       if (chunk) yield chunk;
+    }
+    // One final usage-only chunk, OpenAI `stream_options.include_usage` shape.
+    // anthropicInbound skips chunks without choices, and the gateway's usage
+    // ledger reads it before forwarding.
+    if (usageTotals.input > 0 || usageTotals.output > 0) {
+      yield {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: requestModel,
+        choices: [],
+        usage: {
+          prompt_tokens: usageTotals.input,
+          completion_tokens: usageTotals.output,
+          total_tokens: usageTotals.input + usageTotals.output,
+          ...(usageTotals.cached > 0
+            ? { prompt_tokens_details: { cached_tokens: usageTotals.cached } }
+            : {}),
+        },
+      };
     }
   } catch (err) {
     throw new Error(`Anthropic stream error: ${err instanceof Error ? err.message : String(err)}`);
@@ -532,6 +665,16 @@ interface AnthropicStreamEvent {
   };
   message?: {
     stop_reason?: string;
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+    };
+  };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
   };
 }
 

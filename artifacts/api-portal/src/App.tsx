@@ -2,12 +2,14 @@ import { useState } from "react";
 import ConfigPage from "./pages/ConfigPage";
 import ModelsPage from "./pages/ModelsPage";
 import DocsPage from "./pages/DocsPage";
+import UsagePage from "./pages/UsagePage";
 
-type Tab = "config" | "models" | "docs";
+type Tab = "config" | "models" | "usage" | "docs";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "config", label: "配置" },
   { id: "models", label: "模型管理" },
+  { id: "usage", label: "用量统计" },
   { id: "docs", label: "API 文档" },
 ];
 
@@ -66,6 +68,7 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-4 py-6">
           {activeTab === "config" && <ConfigPage />}
           {activeTab === "models" && <ModelsPage />}
+          {activeTab === "usage" && <UsagePage />}
           {activeTab === "docs" && <DocsPage />}
         </div>
       </main>

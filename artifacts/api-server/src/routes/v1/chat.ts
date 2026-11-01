@@ -9,6 +9,10 @@ import {
   MAX_ATTEMPTS_NODE_FAULT,
 } from "../../lib/providerDispatch.js";
 import { logger } from "../../lib/logger.js";
+import { runWithQuotaStrikeScope } from "../../lib/upstreamNodeFailure.js";
+import { asUpstreamUnavailableError } from "../../lib/providerEndpoint.js";
+import { asUpstreamHttpError } from "../../lib/upstreamError.js";
+import { looksLikeOutputLimitRejection, shrinkOutputBudget } from "../../lib/outputLimits.js";
 import type { ChatCompletionRequest, StreamChunk } from "../../types.js";
 
 const router = Router();
@@ -37,7 +41,12 @@ function extractPassthroughHeaders(req: Request): Record<string, string> {
   return out;
 }
 
-router.post("/v1/chat/completions", requireAuth, async (req: Request, res: Response) => {
+router.post("/v1/chat/completions", requireAuth, (req: Request, res: Response) =>
+  // One request = one strike id, so the gateway's own replays across the pool
+  // count as a single observation of "this node is throttled" rather than one
+  // strike each. Without this a single request that replays six times could
+  // evict a healthy node on a channel-wide rate limit.
+  runWithQuotaStrikeScope(async () => {
   // Allow up to 600 seconds for model generation
   res.setTimeout(600_000);
   req.socket.setTimeout(600_000);
@@ -87,20 +96,54 @@ router.post("/v1/chat/completions", requireAuth, async (req: Request, res: Respo
       break;
     } catch (err) {
       lastErr = err;
+      // No endpoint exists right now (pool drained between attempts). Retrying
+      // in the same millisecond cannot help — a replacement node needs seconds
+      // to become usable — so stop and answer 503 + Retry-After.
+      if (asUpstreamUnavailableError(err)) break;
+      // The gateway defaults the output budget to each upstream's maximum; a
+      // model that accepts less answers "max_tokens too large". Halve and replay.
+      const upstream = asUpstreamHttpError(err);
+      if (upstream && looksLikeOutputLimitRejection(upstream.status, upstream.body)) {
+        const shrunk = shrinkOutputBudget(request);
+        if (shrunk !== null) {
+          logger.warn(
+            { provider, to: shrunk },
+            "upstream rejected the output budget — retrying with a smaller max_tokens",
+          );
+          continue;
+        }
+      }
       const limit = isNodeFault(err) ? MAX_ATTEMPTS_NODE_FAULT : MAX_ATTEMPTS;
       if (attempt >= limit) {
         logger.error({ err, attempt, limit, provider }, "all attempts exhausted");
         break;
       }
       logger.warn({ err, attempt, limit, provider }, "attempt failed, retrying");
+      // Every pool node forwards to the same upstream channel, so a retry fired
+      // in the same second lands inside the same throttling window and fails
+      // again — six attempts in 7s have been observed dying on one wrapped
+      // 429/quota-exhausted envelope. Back off exponentially so the window can
+      // clear before the next node is tried.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** (attempt - 1), 8000)));
     }
   }
 
   if (result === undefined) {
     const message = lastErr instanceof Error ? lastErr.message : "Unknown error";
-    req.log.error({ err: lastErr }, "Chat completion error after all retries");
+    const unavailable = asUpstreamUnavailableError(lastErr);
+    req.log.error(
+      { err: lastErr, retryAfterSeconds: unavailable?.retryAfterSeconds },
+      "Chat completion error after all retries",
+    );
     if (!res.headersSent) {
-      res.status(502).json({ error: { message, type: "upstream_error" } });
+      if (unavailable) {
+        // Temporary drain: tell the client when to come back instead of
+        // returning a 502 that reads like a permanent gateway fault.
+        res.setHeader("Retry-After", String(unavailable.retryAfterSeconds));
+        res.status(503).json({ error: { message, type: "upstream_unavailable" } });
+      } else {
+        res.status(502).json({ error: { message, type: "upstream_error" } });
+      }
     }
     return;
   }
@@ -126,6 +169,7 @@ router.post("/v1/chat/completions", requireAuth, async (req: Request, res: Respo
   } else {
     res.json(result);
   }
-});
+  }),
+);
 
 export default router;
