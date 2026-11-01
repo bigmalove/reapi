@@ -4,10 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build",
-    "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "dev": "node ../../scripts/ensure-deps.mjs vite && vite dev",
+    "build": "node ../../scripts/ensure-deps.mjs vite && vite build",
+    "preview": "node ../../scripts/ensure-deps.mjs vite && vite preview",
+    "typecheck": "node ../../scripts/ensure-deps.mjs tsc && tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",

@@ -419,3 +419,46 @@ On startup, `initSettings()` and `initModels()` load from the database into an i
 3. **Usage** — totals, per-model cost (OpenRouter catalog prices), per-account and
    per-channel breakdown, daily series, recent calls, blocked-pool view, price refresh / ledger reset
 4. **API Docs** — Authentication, endpoint reference, code examples
+
+## Install / Build / Deploy (read this before touching dependency config)
+
+Three failures look like build errors but are install errors:
+
+| 症状 | 真因 |
+| --- | --- |
+| `WARN Local package.json exists, but node_modules missing` | `pnpm install` 失败或被杀，工作区根本没有依赖 |
+| `sh: 1: vite: not found` | 同上，`node_modules/.bin` 里没有 vite |
+| `Cannot find module 'esbuild'`（来自 `build.mjs`） | 同上，esbuild 的安装被中断 |
+
+两条曾经真实踩到的坑：
+
+1. **`ERR_MODULE_NOT_FOUND`/`ERR_PNPM_IGNORED_BUILDS`** — pnpm 10 用 `pnpm-workspace.yaml` 的
+   `onlyBuiltDependencies` 放行构建脚本；pnpm 11 不再读它，改为 `allowBuilds`，而且拒绝执行 esbuild 的
+   install 脚本时会**直接失败**（不是警告）。所以 `pnpm-workspace.yaml` 同时声明两个键，pnpm 10 / 11 都能装。
+2. **`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`** — 非 TTY（Replit workflow / post-merge / deploy builder）
+   下 pnpm 拒绝清除过期 `node_modules` 并退出，工作区就此没有依赖。仓库级开关写在
+   `pnpm-workspace.yaml` 的 `confirmModulesPurge: false`（`.npmrc` 里的 `confirm-modules-purge` **不生效**，
+   已实测），这样平台自己的自动安装也能自愈，不需要任何终端命令。`scripts/bootstrap.sh` 另外导出
+   `CI=true` / `npm_config_confirm_modules_purge=false` 作为第二道保险。
+3. **依赖为空时每个 artifact 的命令都先自愈** — 三个 artifact 的 `dev`/`build`/`typecheck` 前置了
+   `node ../../scripts/ensure-deps.mjs <vite|esbuild|tsc>`：工具找不到就先把 workspace 装好，再执行原命令。
+   Replit 里点 workflow 时不需要有人先跑 `pnpm install`。
+
+入口统一在这几个脚本里，不要各自 `pnpm install`：
+
+- `scripts/ensure-deps.mjs` — 每个 artifact 命令的前置自愈（workflow 直接可用）
+- `scripts/bootstrap.sh` — 安装 + 冻结锁文件失败时自动刷新锁文件 + 校验三个 artifact 的 `vite`/`esbuild`
+- `scripts/deploy-build.sh` — 部署构建（bootstrap → api-server esbuild → api-portal vite），供 `.replit [deployment].build` 调用
+- `scripts/deploy-run.sh` — 部署启动（`.replit [deployment].run`），dist 缺失时直接报错而不是静默起空服务
+- `scripts/post-merge.sh` — 合并后钩子，容错安装；drizzle push 用 `@workspace/db`（旧的 `--filter db` 从来匹配不到包）
+
+构建脚本不再要求 `PORT` / `BASE_PATH`：它们只影响 dev/preview server，而 `vite build` 在部署构建里没有任何环境变量，
+原先的 `throw` 会让整个 `pnpm run build` 在配置加载阶段就失败。
+
+自检一次过：
+
+```bash
+bash scripts/bootstrap.sh      # 装依赖并校验 vite/esbuild
+pnpm run build                 # 全量（不含部署环境变量）必须通过
+PORT=24927 bash scripts/deploy-run.sh   # curl /healthz -> {"status":"ok"}
+```

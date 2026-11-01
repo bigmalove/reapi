@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
-    "build": "node ./build.mjs",
+    "build": "node ../../scripts/ensure-deps.mjs esbuild && node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "node ../../scripts/ensure-deps.mjs tsc && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",

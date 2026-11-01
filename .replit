@@ -3,6 +3,11 @@ modules = ["nodejs-24", "postgresql-16"]
 [deployment]
 router = "application"
 deploymentTarget = "autoscale"
+# The deploy builder starts from a clean checkout: no node_modules, and no
+# PORT/BASE_PATH. Without an explicit build the image ships whatever dist was
+# committed (or nothing), and the container comes up with missing deps.
+build = ["bash", "scripts/deploy-build.sh"]
+run = ["bash", "scripts/deploy-run.sh"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]
@@ -17,7 +22,9 @@ expertMode = true
 
 [postMerge]
 path = "scripts/post-merge.sh"
-timeoutMs = 20000
+# 20s was below a cold `pnpm install` for 486 packages, so the hook was killed
+# mid-install and the workspace came up with node_modules missing.
+timeoutMs = 300000
 
 [[ports]]
 localPort = 8080

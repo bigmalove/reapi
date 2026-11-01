@@ -68,11 +68,21 @@ catalog:
 
 autoInstallPeers: false
 
+# pnpm 10 reads onlyBuiltDependencies; pnpm 11 dropped that key and made an
+# unapproved build script a hard install failure (ERR_PNPM_IGNORED_BUILDS), not a
+# warning. Replit's nodejs-24 module now ships pnpm 11, so install aborted after
+# unpacking the store and every artifact workflow came up with
+#   WARN Local package.json exists, but node_modules missing, did you mean to install?
+#   sh: 1: vite: not found / Cannot find package 'esbuild'
+# Both keys are declared so the same workspace installs cleanly on pnpm 10 and 11.
 onlyBuiltDependencies:
   - '@swc/core'
   - esbuild
   - msw
   - unrs-resolver
+
+allowBuilds:
+  esbuild: true
 
 overrides:
   # replit uses linux-x64 only, we can exclude all other platforms
@@ -158,3 +168,8 @@ overrides:
   # drizzle-kit uses esbuild internally on an older version that's vulnerable, this overrides it
   "@esbuild-kit/esm-loader": "npm:tsx@^4.21.0"
   esbuild: "0.27.3"
+# Non-TTY installs (Replit workflows / post-merge / deploy builder) must be able
+# to purge a stale node_modules; otherwise pnpm exits 1 with
+# ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY and the workspace is left without
+# dependencies. Repo-level so no shell access is needed to set it.
+confirmModulesPurge: false
