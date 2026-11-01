@@ -52,3 +52,15 @@ artifacts/api-server/data/server_settings.json
 # Local tooling / scratch (project memory, throwaway test harnesses, store)
 .workbuddy/
 .pnpm-store/
+
+# Deployment artifacts are committed on purpose: the Replit package firewall 403s
+# every tarball it has not cached, so the deploy container cannot run
+# `pnpm install` / `pnpm build`. dist/index.mjs is a self-contained esbuild bundle
+# and dist/public is the built portal, so the deployment needs neither.
+# Source maps stay out (they are large and not needed at runtime).
+!artifacts/api-server/dist/
+!artifacts/api-server/dist/**
+artifacts/api-server/dist/**/*.map
+!artifacts/api-portal/dist/
+!artifacts/api-portal/dist/**
+artifacts/api-portal/dist/**/*.map

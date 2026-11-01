@@ -1,4 +1,7 @@
 import express, { type Express } from "express";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes/index.js";
@@ -48,6 +51,26 @@ app.get("/healthz", (_req, res) => {
 app.get("/api/build-info", (_req, res) => {
   res.json({ commit: BUILD_COMMIT, builtAt: BUILD_TIME });
 });
+
+// The admin portal is a static bundle (artifacts/api-portal/dist/public). Serving
+// it from the same process means the deployment needs no vite, no node_modules and
+// no second workflow — the bundle in dist/ is the whole app. When the folder is
+// absent (dev without a portal build) the old behaviour is unchanged.
+const portalDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../api-portal/dist/public",
+);
+const portalIndex = path.join(portalDir, "index.html");
+
+if (existsSync(portalIndex)) {
+  app.use(express.static(portalDir, { index: false }));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
+    if (req.path.startsWith("/api") || req.path.startsWith("/v1")) return next();
+    if (req.path === "/healthz") return next();
+    res.sendFile(portalIndex);
+  });
+}
 
 app.use(router);
 app.use(modelsRouter);

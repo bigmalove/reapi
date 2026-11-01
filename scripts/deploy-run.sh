@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
 # Deployment run command (see .replit [deployment].run).
 #
-# The deployment container gets the source tree plus whatever deploy-build.sh
-# produced; PORT is injected by the platform. This script fails loudly instead of
-# silently starting nothing when dist is missing.
-set -euo pipefail
+# Deliberately does NOT use pnpm or node_modules. The Replit package firewall
+# answers 403 ("No authorization header was set") for any tarball it has not
+# cached, so `pnpm install` in this container cannot be relied on. dist/index.mjs
+# is a complete esbuild bundle (express/pg/pino included) committed to the repo,
+# so the deployment only needs `node`.
+set -uo pipefail
 
-cd "$(dirname "$0")/.." || exit 1
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUNDLE="$ROOT/artifacts/api-server/dist/index.mjs"
 
-if [ ! -f artifacts/api-server/dist/index.mjs ]; then
-  echo "!! artifacts/api-server/dist/index.mjs missing — deploy-build.sh did not run" >&2
+if [ ! -f "$BUNDLE" ]; then
+  echo "!! $BUNDLE missing — dist is committed; did a build wipe it?" >&2
+  exit 1
+fi
+
+if [ -z "${PORT:-}" ]; then
+  echo "!! PORT is not set; the platform injects it for the deployment" >&2
   exit 1
 fi
 
 export NODE_ENV="${NODE_ENV:-production}"
 
-exec pnpm --filter @workspace/api-server run start
+echo "==> starting api-server bundle ($(du -h "$BUNDLE" | cut -f1)) on :$PORT"
+echo "==> portal: $ROOT/artifacts/api-portal/dist/public"
+
+exec node "$BUNDLE"

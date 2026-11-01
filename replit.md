@@ -451,6 +451,28 @@ Three failures look like build errors but are install errors:
    `dev`，并行 `pnpm install` 往同一个 `node_modules` 里 rename，必然互相踩踏并留下半成品。
    `ensure-deps.mjs` 与 `bootstrap.sh` 都从 `$PWD/.cache/install.lock` 串行化，后来的等待并复用结果。
 
+5. **`ERR_PNPM_ENOTEMPTY: directory not empty, rename '…_tmp_447'`** — Replit 同时启动三个 workflow 的
+   `dev`，并行 `pnpm install` 往同一个 `node_modules` 里 rename，必然互相踩踏并留下半成品。
+   `ensure-deps.mjs` 与 `bootstrap.sh` 都从 `$PWD/.cache/install.lock` 串行化，后来的等待并复用结果。
+
+### 结论：部署不再依赖 install
+
+Replit 的包防火墙对**任何未缓存的 tarball** 都回 `403 No authorization header was set for the request`，
+而从 workflow / deploy builder 里跑的 pnpm 拿不到那套凭据。这意味着在本容器里 `pnpm install` 是不可靠的
+（`orval-8.5.3.tgz`、`proxy-addr-2.0.8.tgz` 都这样被拒）。所以部署链改成"产物随仓库走"：
+
+- `artifacts/api-server/dist/*.mjs` 与 `artifacts/api-portal/dist/public/**` **提交进仓库**
+  （`dist` 默认被 ignore，`.gitignore` 里对这两个目录做了单独放行；sourcemap 不提交）
+- `deploy-run.sh` 直接 `node artifacts/api-server/dist/index.mjs`，**不经过 pnpm、不需要 node_modules**
+- `api-server` 自己托管门户静态产物（`src/app.ts` 里按 `../../api-portal/dist/public` 查找，非 API 路径回落 index.html），
+  所以部署只需要一个进程、一个端口
+- `deploy-build.sh` 的顺序是：有构建工具 → 重编译；没有 → 尝试安装（失败不致命）；仍没有 → 直接用仓库里的产物；
+  只有产物也缺失才报错。**绝不在工具缺失时调用构建**，因为 `build.mjs` 会先删 `dist/`，失败会连兜底产物一起毁掉
+- `ensure-deps.mjs` 遇到防火墙 403 会改用 `--registry=https://registry.npmjs.org/` 重试一次（`ENSURE_DEPS_FALLBACK_REGISTRY` 可覆盖），
+  失败后 15 分钟内不再重试（`.cache/install-failure.json`），并打印 npmrc/registry 诊断，避免刷屏重装
+
+改完代码要更新部署产物：本地 `pnpm run build` 后把 `artifacts/*/dist` 一起提交。
+
 入口统一在这几个脚本里，不要各自 `pnpm install`：
 
 - `scripts/ensure-deps.mjs` — 每个 artifact 命令的前置自愈（workflow 直接可用，带跨进程安装锁）
