@@ -46,7 +46,37 @@ case "$PNPM_MAJOR" in
   *) info "WARN pnpm $PNPM_MAJOR is outside the tested range 9–11; lockfile features (catalogs, minimumReleaseAge) may be ignored" ;;
 esac
 
+# Serialise with scripts/ensure-deps.mjs: Replit starts the artifact workflows and
+# the deploy build in parallel, and two concurrent `pnpm install` runs on one
+# node_modules fail with
+#   ERR_PNPM_ENOTEMPTY: directory not empty, rename '...yaml_tmp_447' -> '...yaml'
+# `.cache/` is git-ignored and lives outside node_modules, which a purging install
+# would delete.
+LOCK_DIR="$PWD/.cache/install.lock"
+acquire_lock() {
+  mkdir -p "$PWD/.cache"
+  local waited=0
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
+      info "removing stale install lock"
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
+    if [ "$waited" -ge 1200 ]; then
+      fail "timed out waiting for another install to finish"
+    fi
+    info "another install is running — waiting"
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "$$ $(date -Is)" > "$LOCK_DIR/owner"
+}
+release_lock() { rm -rf "$LOCK_DIR"; }
+
 if [ "$SKIP_INSTALL" -eq 0 ]; then
+  acquire_lock
+  trap release_lock EXIT
+
   step "Install dependencies (frozen lockfile)"
   if pnpm install --frozen-lockfile --prefer-offline; then
     info "frozen install OK"
@@ -60,6 +90,8 @@ if [ "$SKIP_INSTALL" -eq 0 ]; then
       || fail "install failed even without --frozen-lockfile — see the registry error above"
     info "lockfile was rewritten; commit pnpm-lock.yaml so the next frozen install stays green"
   fi
+  release_lock
+  trap - EXIT
 fi
 
 step "Verify every workspace package can resolve its own tools"

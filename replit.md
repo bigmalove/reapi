@@ -443,11 +443,18 @@ Three failures look like build errors but are install errors:
 3. **依赖为空时每个 artifact 的命令都先自愈** — 三个 artifact 的 `dev`/`build`/`typecheck` 前置了
    `node ../../scripts/ensure-deps.mjs <vite|esbuild|tsc>`：工具找不到就先把 workspace 装好，再执行原命令。
    Replit 里点 workflow 时不需要有人先跑 `pnpm install`。
+4. **`ERR_PNPM_FETCH_403 … package-firewall.replit.internal/npm/proxy-addr/-/proxy-addr-2.0.7.tgz`** —
+   Replit 的包防火墙拒发 `proxy-addr@2.0.7` 的 tarball，而这个版本是 `express@5.2.1` 的传递依赖。
+   参考快照里的 `express@^5.3.0` 会解析到 `proxy-addr@2.0.8`，能正常拉取；所以 `artifacts/api-server`
+   的 express 升到 `^5.3.0`、锁文件重生成。**不要**把 express 写回 `^5`，回到 5.2.x 就等于回到 403。
+5. **`ERR_PNPM_ENOTEMPTY: directory not empty, rename '…_tmp_447'`** — Replit 同时启动三个 workflow 的
+   `dev`，并行 `pnpm install` 往同一个 `node_modules` 里 rename，必然互相踩踏并留下半成品。
+   `ensure-deps.mjs` 与 `bootstrap.sh` 都从 `$PWD/.cache/install.lock` 串行化，后来的等待并复用结果。
 
 入口统一在这几个脚本里，不要各自 `pnpm install`：
 
-- `scripts/ensure-deps.mjs` — 每个 artifact 命令的前置自愈（workflow 直接可用）
-- `scripts/bootstrap.sh` — 安装 + 冻结锁文件失败时自动刷新锁文件 + 校验三个 artifact 的 `vite`/`esbuild`
+- `scripts/ensure-deps.mjs` — 每个 artifact 命令的前置自愈（workflow 直接可用，带跨进程安装锁）
+- `scripts/bootstrap.sh` — 安装 + 冻结锁文件失败时自动刷新锁文件 + 校验三个 artifact 的 `vite`/`esbuild`（同一把锁）
 - `scripts/deploy-build.sh` — 部署构建（bootstrap → api-server esbuild → api-portal vite），供 `.replit [deployment].build` 调用
 - `scripts/deploy-run.sh` — 部署启动（`.replit [deployment].run`），dist 缺失时直接报错而不是静默起空服务
 - `scripts/post-merge.sh` — 合并后钩子，容错安装；drizzle push 用 `@workspace/db`（旧的 `--filter db` 从来匹配不到包）
