@@ -58,6 +58,35 @@ export function asUpstreamHttpError(err: unknown): UpstreamHttpError | null {
   return null;
 }
 
+/**
+ * Is this payload a whole HTML document rather than an API response?
+ *
+ * A stopped Replit deployment (`.replit.app`) or a stopped dev workspace is
+ * answered by the platform edge, not by the node app: 404 plus ~8 KB of markup.
+ * Every node route otherwise answers JSON, so leading markup identifies "the
+ * app was never reached". Markup embedded in a JSON string (a relayed upstream
+ * error) sits behind a `{` and is deliberately not matched.
+ */
+export function looksLikeHtmlDocument(body: string): boolean {
+  const text = body.trim();
+  const at = text.search(/<!doctype html|<html[\s>]/i);
+  if (at < 0) return false;
+  const prefix = text.slice(0, at).trim().replace(/\s+/g, " ");
+  return prefix === "" || /^[A-Za-z][\w .-]* error \d{3}:$/.test(prefix);
+}
+
+/**
+ * Client-facing text for a failure whose body is a whole HTML document. The
+ * raw page is useless to a caller (the UI prints a wall of markup and the real
+ * cause disappears), so it collapses to one line; the raw body stays in logs.
+ */
+export function summarizeUpstreamError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? "Unknown error");
+  if (!looksLikeHtmlDocument(raw)) return raw;
+  const status = /\berror (\d{3})\b/.exec(raw)?.[1];
+  return `Upstream returned a Replit placeholder page${status ? ` (HTTP ${status})` : ""} instead of JSON — that node cannot serve and was removed from the pool, please retry`;
+}
+
 /** Does this upstream body mean the model id itself does not exist? */
 export function looksLikeUnknownModel(body: string): boolean {
   return /no endpoints found|not a valid model|model (?:not found|does not exist)|unknown model|invalid model/i.test(

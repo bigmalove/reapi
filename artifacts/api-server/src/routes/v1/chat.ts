@@ -11,7 +11,7 @@ import {
 import { logger } from "../../lib/logger.js";
 import { runWithQuotaStrikeScope } from "../../lib/upstreamNodeFailure.js";
 import { asUpstreamUnavailableError } from "../../lib/providerEndpoint.js";
-import { asUpstreamHttpError } from "../../lib/upstreamError.js";
+import { asUpstreamHttpError, summarizeUpstreamError } from "../../lib/upstreamError.js";
 import { looksLikeOutputLimitRejection, shrinkOutputBudget } from "../../lib/outputLimits.js";
 import type { ChatCompletionRequest, StreamChunk } from "../../types.js";
 
@@ -129,7 +129,9 @@ router.post("/v1/chat/completions", requireAuth, (req: Request, res: Response) =
   }
 
   if (result === undefined) {
-    const message = lastErr instanceof Error ? lastErr.message : "Unknown error";
+    // Never hand a whole HTML placeholder page to the caller: it prints a
+    // wall of markup and hides the real cause. Raw body is logged below.
+    const message = summarizeUpstreamError(lastErr);
     const unavailable = asUpstreamUnavailableError(lastErr);
     req.log.error(
       { err: lastErr, retryAfterSeconds: unavailable?.retryAfterSeconds },

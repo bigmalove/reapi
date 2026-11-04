@@ -14,7 +14,12 @@ import {
   maybeDisableSelectedNode,
   runWithQuotaStrikeScope,
 } from "../../lib/upstreamNodeFailure.js";
-import { asUpstreamHttpError, looksLikeUnknownModel } from "../../lib/upstreamError.js";
+import {
+  asUpstreamHttpError,
+  looksLikeHtmlDocument,
+  looksLikeUnknownModel,
+  summarizeUpstreamError,
+} from "../../lib/upstreamError.js";
 import { DEFAULT_MAX_OUTPUT_TOKENS, resolveMaxOutputTokens } from "../../lib/outputLimits.js";
 import {
   looksLikeOutputLimitRejection,
@@ -570,12 +575,12 @@ async function proxyAnthropicNative(args: {
     );
   }
 
-  const message = last?.error?.message ?? "Anthropic upstream failed";
+  const message = summarizeUpstreamError(last?.error?.message ?? "Anthropic upstream failed");
   if (!args.res.headersSent) {
     // Every node was exhausted mid-retry. Relay the last upstream status (403
     // quota, 402, 429) so the client shows the real cause instead of a blanket
     // 502 that reads as "the gateway is broken".
-    if (last?.status && last.text) {
+    if (last?.status && last.text && !looksLikeHtmlDocument(last.text)) {
       args.res
         .status(last.status)
         .json(parseAnthropicErrorBody(last.text, statusToErrorType(last.status)));

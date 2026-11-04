@@ -14,6 +14,7 @@ import {
 } from "./providerEndpoint.js";
 import type { ProviderEndpoint, ProviderName } from "./providerEndpoint.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { looksLikeHtmlDocument } from "./upstreamError.js";
 
 interface NodeDisableSignal {
   provider: string;
@@ -95,6 +96,18 @@ export function detectReplitNotRunning(body: string): string | null {
     !body.includes("Cannot POST")
   ) {
     return "Replit Repl no longer exists (generic 404 page returned)";
+  }
+
+  // Last resort: any HTML document at all. The markers above are a moving
+  // target — Replit ships new placeholder pages faster than this list grows,
+  // and a miss leaves the dead node in rotation (observed 2026-11-04: "This
+  // app isn't live yet" is only identifiable by a link near the end of an
+  // ~8 KB page). Shape, not wording: every node route answers JSON, so a body
+  // that starts with markup means the edge answered instead of the app.
+  // The node app's own Express 404 (`Cannot GET`) is HTML too, but the app is
+  // answering — that is a request problem, not a dead node.
+  if (looksLikeHtmlDocument(body) && !body.includes("Cannot GET") && !body.includes("Cannot POST")) {
+    return "Replit edge returned an HTML placeholder page instead of the node app";
   }
   return null;
 }
