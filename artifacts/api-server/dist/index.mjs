@@ -38580,6 +38580,63 @@ var import_express4 = __toESM(require_express2(), 1);
 
 // src/lib/upstreamNodeFailure.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+
+// src/lib/upstreamError.ts
+var UpstreamHttpError = class extends Error {
+  provider;
+  status;
+  body;
+  /**
+   * The failure was attributed to the pool node we sent it to (quota exhausted,
+   * forbidden, payment required…) and that node has just been dropped from the
+   * pool. The same request replayed on the next node is a different account, so
+   * it is worth retrying even though the status is a 4xx.
+   */
+  nodeRetryable;
+  constructor(provider, status, body, nodeRetryable = false) {
+    super(`${provider} error ${status}: ${body}`);
+    this.name = "UpstreamHttpError";
+    this.provider = provider;
+    this.status = status;
+    this.body = body;
+    this.nodeRetryable = nodeRetryable;
+  }
+  /**
+   * 4xx other than 429: the request itself is wrong, retrying cannot help —
+   * unless the node itself was the problem (`nodeRetryable`), in which case a
+   * 403/402 names an exhausted account rather than a malformed request.
+   */
+  get isClientError() {
+    return this.status >= 400 && this.status < 500 && this.status !== 429 && !this.nodeRetryable;
+  }
+};
+function asUpstreamHttpError(err) {
+  if (err instanceof UpstreamHttpError) return err;
+  if (err instanceof Error && typeof err.status === "number" && typeof err.provider === "string" && typeof err.body === "string") {
+    return err;
+  }
+  return null;
+}
+function looksLikeHtmlDocument(body) {
+  const text = body.trim();
+  const at = text.search(/<!doctype html|<html[\s>]/i);
+  if (at < 0) return false;
+  const prefix = text.slice(0, at).trim().replace(/\s+/g, " ");
+  return prefix === "" || /^[A-Za-z][\w .-]* error \d{3}:$/.test(prefix);
+}
+function summarizeUpstreamError(err) {
+  const raw = err instanceof Error ? err.message : String(err ?? "Unknown error");
+  if (!looksLikeHtmlDocument(raw)) return raw;
+  const status = /\berror (\d{3})\b/.exec(raw)?.[1];
+  return `Upstream returned a Replit placeholder page${status ? ` (HTTP ${status})` : ""} instead of JSON \u2014 that node cannot serve and was removed from the pool, please retry`;
+}
+function looksLikeUnknownModel(body) {
+  return /no endpoints found|not a valid model|model (?:not found|does not exist)|unknown model|invalid model/i.test(
+    body
+  );
+}
+
+// src/lib/upstreamNodeFailure.ts
 var FREE_TIER_BUDGET_EXCEEDED = "FREE_TIER_BUDGET_EXCEEDED";
 var BUDGET_EXCEEDED_PATTERNS = [
   /FREE_TIER_BUDGET_EXCEEDED/i,
@@ -38611,6 +38668,9 @@ function detectReplitNotRunning(body) {
   }
   if (body.includes("Error: Page not found") && !body.includes("Cannot GET") && !body.includes("Cannot POST")) {
     return "Replit Repl no longer exists (generic 404 page returned)";
+  }
+  if (looksLikeHtmlDocument(body) && !body.includes("Cannot GET") && !body.includes("Cannot POST")) {
+    return "Replit edge returned an HTML placeholder page instead of the node app";
   }
   return null;
 }
@@ -40744,48 +40804,6 @@ var models_default = router8;
 // src/routes/v1/chat.ts
 var import_express9 = __toESM(require_express2(), 1);
 
-// src/lib/upstreamError.ts
-var UpstreamHttpError = class extends Error {
-  provider;
-  status;
-  body;
-  /**
-   * The failure was attributed to the pool node we sent it to (quota exhausted,
-   * forbidden, payment required…) and that node has just been dropped from the
-   * pool. The same request replayed on the next node is a different account, so
-   * it is worth retrying even though the status is a 4xx.
-   */
-  nodeRetryable;
-  constructor(provider, status, body, nodeRetryable = false) {
-    super(`${provider} error ${status}: ${body}`);
-    this.name = "UpstreamHttpError";
-    this.provider = provider;
-    this.status = status;
-    this.body = body;
-    this.nodeRetryable = nodeRetryable;
-  }
-  /**
-   * 4xx other than 429: the request itself is wrong, retrying cannot help —
-   * unless the node itself was the problem (`nodeRetryable`), in which case a
-   * 403/402 names an exhausted account rather than a malformed request.
-   */
-  get isClientError() {
-    return this.status >= 400 && this.status < 500 && this.status !== 429 && !this.nodeRetryable;
-  }
-};
-function asUpstreamHttpError(err) {
-  if (err instanceof UpstreamHttpError) return err;
-  if (err instanceof Error && typeof err.status === "number" && typeof err.provider === "string" && typeof err.body === "string") {
-    return err;
-  }
-  return null;
-}
-function looksLikeUnknownModel(body) {
-  return /no endpoints found|not a valid model|model (?:not found|does not exist)|unknown model|invalid model/i.test(
-    body
-  );
-}
-
 // src/lib/claudeCode.ts
 var THINKING_SUFFIX_RE2 = /-thinking(-visible|-low|-medium|-high|-xhigh|-max)?$/;
 function splitThinkingSuffix(id) {
@@ -42762,7 +42780,7 @@ router9.post(
         }
       }
       if (result === void 0) {
-        const message = lastErr instanceof Error ? lastErr.message : "Unknown error";
+        const message = summarizeUpstreamError(lastErr);
         const unavailable = asUpstreamUnavailableError(lastErr);
         req.log.error(
           { err: lastErr, retryAfterSeconds: unavailable?.retryAfterSeconds },
@@ -43648,9 +43666,9 @@ async function proxyAnthropicNative(args) {
       "claude code upstream attempt failed, retrying"
     );
   }
-  const message = last?.error?.message ?? "Anthropic upstream failed";
+  const message = summarizeUpstreamError(last?.error?.message ?? "Anthropic upstream failed");
   if (!args.res.headersSent) {
-    if (last?.status && last.text) {
+    if (last?.status && last.text && !looksLikeHtmlDocument(last.text)) {
       args.res.status(last.status).json(parseAnthropicErrorBody(last.text, statusToErrorType(last.status)));
     } else {
       args.res.status(502).json(anthropicError("api_error", message));
@@ -44176,8 +44194,8 @@ router12.get("/v1/videos/generations/:id", requireAuth, async (req, res) => {
 var videos_default = router12;
 
 // src/lib/buildInfo.ts
-var BUILD_COMMIT = true ? "8ac6211" : "dev";
-var BUILD_TIME = true ? "2026-11-01T11:53:20.946Z" : "dev";
+var BUILD_COMMIT = true ? "bdaa074" : "dev";
+var BUILD_TIME = true ? "2026-11-04T10:45:21.168Z" : "dev";
 
 // src/app.ts
 var app = (0, import_express13.default)();
