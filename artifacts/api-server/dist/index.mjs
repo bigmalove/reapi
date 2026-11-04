@@ -40214,6 +40214,16 @@ var MODEL_REGISTRY = [
   { id: "claude-opus-5-thinking-high", provider: "anthropic", created: 1785024e3 },
   { id: "claude-opus-5-thinking-xhigh", provider: "anthropic", created: 1785024e3 },
   { id: "claude-opus-5-thinking-max", provider: "anthropic", created: 1785024e3 },
+  // Dashed spelling only: the upstream Anthropic channel rejects the point
+  // form (`claude-opus-5.5` → UNSUPPORTED_MODEL) for the whole Claude family.
+  { id: "claude-opus-5-5", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-visible", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-low", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-medium", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-high", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-xhigh", provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-max", provider: "anthropic", created: 1791907477 },
   { id: "claude-opus-4-8", provider: "anthropic", created: 1759276800 },
   { id: "claude-opus-4-8-thinking", provider: "anthropic", created: 1759276800 },
   { id: "claude-opus-4-8-thinking-visible", provider: "anthropic", created: 1759276800 },
@@ -40257,6 +40267,14 @@ var MODEL_REGISTRY = [
   { id: "claude-sonnet-5-thinking-high", provider: "anthropic", created: 1782864e3 },
   { id: "claude-sonnet-5-thinking-xhigh", provider: "anthropic", created: 1782864e3 },
   { id: "claude-sonnet-5-thinking-max", provider: "anthropic", created: 1782864e3 },
+  { id: "claude-sonnet-5-5", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-visible", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-low", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-medium", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-high", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-xhigh", provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-max", provider: "anthropic", created: 1791907477 },
   { id: "claude-sonnet-4-6", provider: "anthropic", created: 1753142400 },
   { id: "claude-sonnet-4-6-thinking", provider: "anthropic", created: 1753142400 },
   { id: "claude-sonnet-4-6-thinking-visible", provider: "anthropic", created: 1753142400 },
@@ -40281,6 +40299,16 @@ var MODEL_REGISTRY = [
   { id: "claude-haiku-4-5-thinking-high", provider: "anthropic", created: 1751328e3 },
   { id: "claude-haiku-4-5-thinking-xhigh", provider: "anthropic", created: 1751328e3 },
   { id: "claude-haiku-4-5-thinking-max", provider: "anthropic", created: 1751328e3 },
+  // haiku-5-5 also takes adaptive thinking only (budget_tokens is rejected), so
+  // `claude-haiku-5` is in ADAPTIVE_THINKING_PREFIXES in providers/anthropic.ts.
+  { id: "claude-haiku-5-5", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-visible", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-low", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-medium", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-high", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-xhigh", provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-max", provider: "anthropic", created: 1791907477 },
   { id: "claude-fable-5", provider: "anthropic", created: 17496e5 },
   { id: "claude-fable-5-thinking", provider: "anthropic", created: 17496e5 },
   { id: "claude-fable-5-thinking-visible", provider: "anthropic", created: 17496e5 },
@@ -40316,6 +40344,17 @@ var MODEL_REGISTRY = [
   { id: "gemini-3.5-flash-thinking-high", provider: "gemini", created: 1753747200 },
   { id: "gemini-3.5-flash-thinking-max", provider: "gemini", created: 1753747200 },
   { id: "gemini-2.5-flash-lite", provider: "gemini", created: 1751328e3 },
+  // Gemini 4 family: thinking is selected by level (low/medium/high/max), not
+  // by token budget — see providers/gemini.ts. `-thinking-xhigh` is registered
+  // for client symmetry and resolves to `max`, the highest level the API takes.
+  { id: "gemini-4-argon", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-visible", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-low", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-medium", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-high", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-xhigh", provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-max", provider: "gemini", created: 1791907477 },
   // ── OpenRouter Featured ───────────────────────────────────────────────────
   { id: "sakana/fugu-ultra", provider: "openrouter", created: 1750377600 },
   { id: "openrouter/fusion", provider: "openrouter", created: 1750032e3 },
@@ -41476,7 +41515,10 @@ async function callAnthropic(request, clientHeaders = {}) {
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-fable-5",
-    "claude-sonnet-5"
+    "claude-sonnet-5",
+    // haiku-5-5 rejects `thinking.type.enabled` + budget_tokens with
+    // INVALID_ARGUMENT and takes `type:"adaptive"` + `output_config.effort`.
+    "claude-haiku-5"
   ];
   const usesAdaptiveThinking2 = ADAPTIVE_THINKING_PREFIXES2.some(
     (prefix) => actualModel === prefix || actualModel.startsWith(`${prefix}.`) || actualModel.startsWith(`${prefix}-`)
@@ -41955,17 +41997,27 @@ async function callGemini(request, clientHeaders = {}) {
     low: 1024,
     medium: 8192,
     high: 16384,
+    xhigh: 24576,
     max: 32768
   };
-  const budgetLevelMatch = actualModelId.match(/-thinking-(low|medium|high|max)$/);
+  const isLevelModel = /^gemini-(?:4|5)(?:[.-]|$)/.test(actualModelId.split("-thinking")[0] ?? "");
+  const levelNameMap = {
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "max",
+    max: "max"
+  };
+  const budgetLevelMatch = actualModelId.match(/-thinking-(low|medium|high|xhigh|max)$/);
   if (budgetLevelMatch) {
     thinkingEnabled = true;
-    thinkingBudget = budgetLevelMap[budgetLevelMatch[1]];
-    actualModelId = actualModelId.replace(/-thinking-(low|medium|high|max)$/, "");
+    thinkingBudget = budgetLevelMap[budgetLevelMatch[1]] ?? -1;
+    actualModelId = actualModelId.replace(/-thinking-(low|medium|high|xhigh|max)$/, "");
   } else if (actualModelId.endsWith("-thinking-visible") || actualModelId.endsWith("-thinking")) {
     thinkingEnabled = true;
     actualModelId = actualModelId.replace(/-thinking-visible$/, "").replace(/-thinking$/, "");
   }
+  const thinkingLevel = budgetLevelMatch ? levelNameMap[budgetLevelMatch[1]] ?? "high" : "high";
   const { systemInstruction, contents } = convertMessagesToGemini(request.messages);
   const geminiModel = getGeminiModelName(actualModelId);
   const action = request.stream ? "streamGenerateContent" : "generateContent";
@@ -42019,8 +42071,9 @@ async function callGemini(request, clientHeaders = {}) {
       ...extra.seed !== void 0 ? { seed: extra.seed } : {},
       ...extra.n !== void 0 ? { candidateCount: extra.n } : {},
       ...responseFormat ? responseFormat : {},
-      // Enable extended thinking for thinking variants (-1 = dynamic budget, or preset budget in tokens)
-      ...thinkingEnabled ? { thinkingConfig: { thinkingBudget } } : {}
+      // Enable extended thinking for thinking variants. Budget-era models take a
+      // token budget (-1 = dynamic); gemini-4+ takes a named level instead.
+      ...thinkingEnabled ? { thinkingConfig: isLevelModel ? { thinkingLevel } : { thinkingBudget } } : {}
     }
   };
   const safety = extra.safetySettings ?? extra.safety_settings;
@@ -44194,8 +44247,8 @@ router12.get("/v1/videos/generations/:id", requireAuth, async (req, res) => {
 var videos_default = router12;
 
 // src/lib/buildInfo.ts
-var BUILD_COMMIT = true ? "bdaa074" : "dev";
-var BUILD_TIME = true ? "2026-11-04T10:45:21.168Z" : "dev";
+var BUILD_COMMIT = true ? "24b2a53" : "dev";
+var BUILD_TIME = true ? "2026-11-04T13:54:41.461Z" : "dev";
 
 // src/app.ts
 var app = (0, import_express13.default)();
