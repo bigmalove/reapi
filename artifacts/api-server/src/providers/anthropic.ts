@@ -382,6 +382,9 @@ export async function callAnthropic(
     "claude-opus-4-8",
     "claude-fable-5",
     "claude-sonnet-5",
+    // haiku-5-5 rejects `thinking.type.enabled` + budget_tokens with
+    // INVALID_ARGUMENT and takes `type:"adaptive"` + `output_config.effort`.
+    "claude-haiku-5",
   ];
   const usesAdaptiveThinking = ADAPTIVE_THINKING_PREFIXES.some(
     (prefix) =>

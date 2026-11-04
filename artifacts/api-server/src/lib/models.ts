@@ -47,6 +47,16 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "claude-opus-5-thinking-high",          provider: "anthropic", created: 1785024000 },
   { id: "claude-opus-5-thinking-xhigh",         provider: "anthropic", created: 1785024000 },
   { id: "claude-opus-5-thinking-max",           provider: "anthropic", created: 1785024000 },
+  // Dashed spelling only: the upstream Anthropic channel rejects the point
+  // form (`claude-opus-5.5` → UNSUPPORTED_MODEL) for the whole Claude family.
+  { id: "claude-opus-5-5",                      provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking",             provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-visible",     provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-low",         provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-medium",       provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-high",         provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-xhigh",        provider: "anthropic", created: 1791907477 },
+  { id: "claude-opus-5-5-thinking-max",          provider: "anthropic", created: 1791907477 },
   { id: "claude-opus-4-8",                      provider: "anthropic", created: 1759276800 },
   { id: "claude-opus-4-8-thinking",             provider: "anthropic", created: 1759276800 },
   { id: "claude-opus-4-8-thinking-visible",     provider: "anthropic", created: 1759276800 },
@@ -90,6 +100,14 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "claude-sonnet-5-thinking-high",        provider: "anthropic", created: 1782864000 },
   { id: "claude-sonnet-5-thinking-xhigh",       provider: "anthropic", created: 1782864000 },
   { id: "claude-sonnet-5-thinking-max",         provider: "anthropic", created: 1782864000 },
+  { id: "claude-sonnet-5-5",                    provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking",           provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-visible",   provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-low",       provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-medium",    provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-high",      provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-xhigh",     provider: "anthropic", created: 1791907477 },
+  { id: "claude-sonnet-5-5-thinking-max",       provider: "anthropic", created: 1791907477 },
   { id: "claude-sonnet-4-6",                    provider: "anthropic", created: 1753142400 },
   { id: "claude-sonnet-4-6-thinking",           provider: "anthropic", created: 1753142400 },
   { id: "claude-sonnet-4-6-thinking-visible",   provider: "anthropic", created: 1753142400 },
@@ -114,6 +132,16 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "claude-haiku-4-5-thinking-high",       provider: "anthropic", created: 1751328000 },
   { id: "claude-haiku-4-5-thinking-xhigh",      provider: "anthropic", created: 1751328000 },
   { id: "claude-haiku-4-5-thinking-max",        provider: "anthropic", created: 1751328000 },
+  // haiku-5-5 also takes adaptive thinking only (budget_tokens is rejected), so
+  // `claude-haiku-5` is in ADAPTIVE_THINKING_PREFIXES in providers/anthropic.ts.
+  { id: "claude-haiku-5-5",                     provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking",            provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-visible",    provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-low",        provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-medium",     provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-high",       provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-xhigh",      provider: "anthropic", created: 1791907477 },
+  { id: "claude-haiku-5-5-thinking-max",        provider: "anthropic", created: 1791907477 },
   { id: "claude-fable-5",                       provider: "anthropic", created: 1749600000 },
   { id: "claude-fable-5-thinking",              provider: "anthropic", created: 1749600000 },
   { id: "claude-fable-5-thinking-visible",      provider: "anthropic", created: 1749600000 },
@@ -150,6 +178,17 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   { id: "gemini-3.5-flash-thinking-high",            provider: "gemini", created: 1753747200 },
   { id: "gemini-3.5-flash-thinking-max",             provider: "gemini", created: 1753747200 },
   { id: "gemini-2.5-flash-lite",                     provider: "gemini", created: 1751328000 },
+  // Gemini 4 family: thinking is selected by level (low/medium/high/max), not
+  // by token budget — see providers/gemini.ts. `-thinking-xhigh` is registered
+  // for client symmetry and resolves to `max`, the highest level the API takes.
+  { id: "gemini-4-argon",                            provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking",                   provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-visible",           provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-low",               provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-medium",            provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-high",              provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-xhigh",             provider: "gemini", created: 1791907477 },
+  { id: "gemini-4-argon-thinking-max",               provider: "gemini", created: 1791907477 },
 
   // ── OpenRouter Featured ───────────────────────────────────────────────────
   { id: "sakana/fugu-ultra",                 provider: "openrouter", created: 1750377600 },

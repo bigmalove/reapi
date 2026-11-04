@@ -289,18 +289,38 @@ export async function callGemini(
     low:    1024,
     medium: 8192,
     high:   16384,
+    xhigh:  24576,
     max:    32768,
   };
 
-  const budgetLevelMatch = actualModelId.match(/-thinking-(low|medium|high|max)$/);
+  // Gemini 4 and newer swapped the token budget for a named thinking level
+  // (`low` | `medium` | `high` | `max`). Sending `thinkingBudget` to those
+  // models is rejected with INVALID_ARGUMENT: "Thinking budget is not supported
+  // for this model. Use thinking level instead."
+  const isLevelModel = /^gemini-(?:4|5)(?:[.-]|$)/.test(actualModelId.split("-thinking")[0] ?? "");
+
+  // The two families disagree on how much thinking they accept. `-thinking`
+  // without an effort suffix means "let the model decide": budget models get
+  // -1 (dynamic), level models get `high`, which is their default ceiling.
+  const levelNameMap: Record<string, string> = {
+    low:    "low",
+    medium: "medium",
+    high:   "high",
+    xhigh:  "max",
+    max:    "max",
+  };
+
+  const budgetLevelMatch = actualModelId.match(/-thinking-(low|medium|high|xhigh|max)$/);
   if (budgetLevelMatch) {
     thinkingEnabled = true;
-    thinkingBudget = budgetLevelMap[budgetLevelMatch[1]];
-    actualModelId = actualModelId.replace(/-thinking-(low|medium|high|max)$/, "");
+    thinkingBudget = budgetLevelMap[budgetLevelMatch[1]] ?? -1;
+    actualModelId = actualModelId.replace(/-thinking-(low|medium|high|xhigh|max)$/, "");
   } else if (actualModelId.endsWith("-thinking-visible") || actualModelId.endsWith("-thinking")) {
     thinkingEnabled = true;
     actualModelId = actualModelId.replace(/-thinking-visible$/, "").replace(/-thinking$/, "");
   }
+
+  const thinkingLevel = budgetLevelMatch ? (levelNameMap[budgetLevelMatch[1]] ?? "high") : "high";
 
   const { systemInstruction, contents } = convertMessagesToGemini(request.messages);
   const geminiModel = getGeminiModelName(actualModelId);
@@ -388,8 +408,11 @@ export async function callGemini(
       ...(extra.seed !== undefined ? { seed: extra.seed } : {}),
       ...(extra.n !== undefined ? { candidateCount: extra.n } : {}),
       ...(responseFormat ? responseFormat : {}),
-      // Enable extended thinking for thinking variants (-1 = dynamic budget, or preset budget in tokens)
-      ...(thinkingEnabled ? { thinkingConfig: { thinkingBudget } } : {}),
+      // Enable extended thinking for thinking variants. Budget-era models take a
+      // token budget (-1 = dynamic); gemini-4+ takes a named level instead.
+      ...(thinkingEnabled
+        ? { thinkingConfig: isLevelModel ? { thinkingLevel } : { thinkingBudget } }
+        : {}),
     },
   };
 
