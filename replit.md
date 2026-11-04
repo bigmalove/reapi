@@ -422,6 +422,9 @@ On startup, `initSettings()` and `initModels()` load from the database into an i
 
 ## Install / Build / Deploy (read this before touching dependency config)
 
+> 提交规则见仓库根目录 `AGENTS.md`：**改完源码必须在本机 `pnpm run build` 并提交
+> `artifacts/*/dist`**；提交前跑 `pnpm run check:dist`（校验产物构建戳与 HEAD 一致、且没有未提交的构建输入）。
+
 Three failures look like build errors but are install errors:
 
 | 症状 | 真因 |

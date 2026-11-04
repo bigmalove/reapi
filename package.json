@@ -10,7 +10,9 @@
     "dev:api": "pnpm --filter @workspace/api-server run dev",
     "dev:portal": "pnpm --filter @workspace/api-portal run dev",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "check:dist": "node scripts/check-dist.mjs",
+    "verify": "node scripts/check-dist.mjs && bash scripts/bootstrap.sh"
   },
   "private": true,
   "devDependencies": {
