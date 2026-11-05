@@ -13,6 +13,7 @@ import { runWithQuotaStrikeScope } from "../../lib/upstreamNodeFailure.js";
 import { asUpstreamUnavailableError } from "../../lib/providerEndpoint.js";
 import { asUpstreamHttpError, summarizeUpstreamError } from "../../lib/upstreamError.js";
 import { looksLikeOutputLimitRejection, shrinkOutputBudget } from "../../lib/outputLimits.js";
+import { applyUpstreamCacheBreakpoints, isAnthropicFamilyModel } from "../../lib/anthropicCache.js";
 import type { ChatCompletionRequest, StreamChunk } from "../../types.js";
 
 const router = Router();
@@ -82,7 +83,15 @@ router.post("/v1/chat/completions", requireAuth, (req: Request, res: Response) =
     messages.push({ role: "user", content: "继续" });
   }
 
-  const request: ChatCompletionRequest = { ...body, model, messages };
+  // Anthropic models reached over an OpenAI-shaped upstream need explicit
+  // `cache_control` markers or every step is billed as a cold prompt. The
+  // native-anthropic path tags its own body inside convertMessagesToAnthropic.
+  const upstreamMessages =
+    provider === "anthropic" || !isAnthropicFamilyModel(model)
+      ? messages
+      : applyUpstreamCacheBreakpoints(messages);
+
+  const request: ChatCompletionRequest = { ...body, model, messages: upstreamMessages };
   const clientHeaders = extractPassthroughHeaders(req);
 
   const dispatch = () => callProvider(provider, request, clientHeaders);

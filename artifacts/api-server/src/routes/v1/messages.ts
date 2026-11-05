@@ -44,6 +44,7 @@ import {
   type AnthropicMessagesBody,
 } from "../../lib/anthropicInbound.js";
 import { logger } from "../../lib/logger.js";
+import { applyUpstreamCacheBreakpoints, isAnthropicFamilyModel } from "../../lib/anthropicCache.js";
 import type { ChatCompletionResponse, StreamChunk } from "../../types.js";
 
 /**
@@ -756,6 +757,12 @@ async function proxyConverted(args: {
   }
 
   const request = anthropicToOpenAIRequest(body, model);
+  // The Anthropic -> OpenAI conversion flattens content blocks, which drops the
+  // client's own `cache_control` markers. Re-tag the outbound body so an
+  // Anthropic model served by an OpenAI-shaped upstream still caches its prefix.
+  if (isAnthropicFamilyModel(request.model)) {
+    request.messages = applyUpstreamCacheBreakpoints(request.messages);
+  }
   let result: Awaited<ReturnType<typeof callProvider>> | undefined;
   let preview: StreamPreview | null = null;
   let lastErr: unknown;

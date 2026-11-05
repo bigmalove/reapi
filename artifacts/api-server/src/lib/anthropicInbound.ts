@@ -567,6 +567,41 @@ function newMessageId(): string {
   return `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * Translate an OpenAI-shaped usage object into Anthropic's accounting.
+ *
+ * Anthropic reports the three prompt-side tokens as separate fields: `input_tokens`
+ * excludes whatever was cached, plus `cache_read_input_tokens` /
+ * `cache_creation_input_tokens`. OpenAI folds cache reads into `prompt_tokens`,
+ * so forwarding that number as `input_tokens` both overstates the bill and
+ * erases the cache hit — a client that renders `cache_read_input_tokens` then
+ * shows 0% no matter what the upstream did.
+ */
+function anthropicUsageFromOpenAI(usage: unknown): {
+  usage: AnthropicUsage;
+} {
+  const raw = (usage ?? {}) as Record<string, unknown>;
+  const details = (raw["prompt_tokens_details"] ?? {}) as Record<string, unknown>;
+  const promptTokens = num(raw["prompt_tokens"] ?? raw["input_tokens"]);
+  const cacheRead = num(details["cached_tokens"] ?? raw["cached_tokens"]);
+  // `cache_write_tokens` is OpenRouter's extension; not in the shared StreamChunk type.
+  const cacheWrite = num(details["cache_write_tokens"]);
+  const outputTokens = num(raw["output_tokens"] ?? raw["completion_tokens"]);
+
+  return {
+    usage: {
+      input_tokens: Math.max(0, promptTokens - cacheRead - cacheWrite),
+      output_tokens: outputTokens,
+      ...(cacheRead > 0 ? { cache_read_input_tokens: cacheRead } : {}),
+      ...(cacheWrite > 0 ? { cache_creation_input_tokens: cacheWrite } : {}),
+    },
+  };
+}
+
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 export function anthropicMessageFromOpenAI(
   response: ChatCompletionResponse,
   requestedModel: string,
@@ -596,10 +631,7 @@ export function anthropicMessageFromOpenAI(
     content,
     stop_reason: mapFinishReason(choice?.finish_reason),
     stop_sequence: null,
-    usage: {
-      input_tokens: response.usage?.prompt_tokens ?? 0,
-      output_tokens: response.usage?.completion_tokens ?? 0,
-    },
+    usage: anthropicUsageFromOpenAI(response.usage).usage,
   };
 }
 
@@ -623,6 +655,13 @@ export async function writeOpenAIStreamAsAnthropic(
   const toolBlocks = new Map<number, { index: number; id: string; name: string }>();
   let stopReason = "end_turn";
   let outputChars = 0;
+  /**
+   * The upstream's own accounting, captured off the final usage chunk. It only
+   * exists after the last token, which is why `message_start` — emitted before
+   * the first token — can only carry an estimate; the real numbers (including
+   * the cache buckets) are attached to `message_delta` below.
+   */
+  let upstreamUsage: StreamChunk["usage"] | undefined;
 
   const send = (event: string, payload: Record<string, unknown>): void => {
     write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
@@ -663,6 +702,8 @@ export async function writeOpenAIStreamAsAnthropic(
   });
 
   for await (const chunk of stream) {
+    // A usage-only chunk carries no choices, so record it before the skip below.
+    if (chunk.usage) upstreamUsage = chunk.usage;
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta ?? {};
@@ -716,10 +757,21 @@ export async function writeOpenAIStreamAsAnthropic(
 
   closeOpen();
 
+  // Anthropic's `message_delta.usage` is spec'd as output tokens only, but the
+  // SDK merges it into the final message and permissive clients read the rest.
+  // Without these, a gateway that does cache the prompt still reports 0 hits.
+  const final = anthropicUsageFromOpenAI(upstreamUsage).usage;
   send("message_delta", {
     type: "message_delta",
     delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { output_tokens: Math.max(1, Math.ceil(outputChars / 4)) },
+    usage: {
+      output_tokens: final.output_tokens > 0 ? final.output_tokens : Math.max(1, Math.ceil(outputChars / 4)),
+      ...(final.input_tokens > 0 ? { input_tokens: final.input_tokens } : {}),
+      ...(final.cache_read_input_tokens ? { cache_read_input_tokens: final.cache_read_input_tokens } : {}),
+      ...(final.cache_creation_input_tokens
+        ? { cache_creation_input_tokens: final.cache_creation_input_tokens }
+        : {}),
+    },
   });
   send("message_stop", { type: "message_stop" });
 }
