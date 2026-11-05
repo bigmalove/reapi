@@ -19,6 +19,16 @@ export interface OpenRouterCatalogEntry {
   promptPrice: string | null;
   completionPrice: string | null;
   modality: string | null;
+  /** Normalised `architecture.output_modalities` (`["text"]`, `["image","text"]`, …). */
+  outputModalities: string[];
+  /**
+   * The model can RETURN images. This is the only reliable drawing signal in the
+   * catalog: `modality` conflates input and output ("text+image->text" means it
+   * only READS images), which is why the picker looked like OpenRouter had no
+   * image models at all. Pure image vendors (flux/ideogram/seedream/dall-e) are
+   * not chat models and never appear in `/models` to begin with.
+   */
+  canOutputImage: boolean;
 }
 
 export interface OpenRouterCatalog {
@@ -57,6 +67,35 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
+/** `["image","text"]` shape, or a comma/slash string in the tolerant fallback path. */
+function toStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((v): v is string => typeof v === "string")
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,+|]/)
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * Whether a model card emits images. Prefers `modality`'s output half
+ * (`text+image->text+image`) because some endpoints only expose that field.
+ */
+function detectsImageOutput(outputModalities: string[], modality: string | null): boolean {
+  if (outputModalities.includes("image")) return true;
+  if (!modality) return false;
+  const arrow = modality.split("->");
+  if (arrow.length !== 2) return false;
+  return arrow[1]!.split("+").some((part) => part.trim().toLowerCase() === "image");
+}
+
 /**
  * Normalise a `/models` payload into catalog entries. Tolerant on purpose: the
  * fallback source is whatever OpenRouter-compatible endpoint the gateway is
@@ -79,6 +118,8 @@ function toEntries(payload: unknown): OpenRouterCatalogEntry[] {
     const topProvider = asRecord(model["top_provider"]);
     const architecture = asRecord(model["architecture"]);
     const description = asString(model["description"]);
+    const modality = asString(architecture["modality"]);
+    const outputModalities = toStringList(architecture["output_modalities"]);
 
     out.push({
       id,
@@ -88,7 +129,9 @@ function toEntries(payload: unknown): OpenRouterCatalogEntry[] {
       contextLength: asNumber(model["context_length"]) ?? asNumber(topProvider["context_length"]),
       promptPrice: asString(pricing["prompt"]),
       completionPrice: asString(pricing["completion"]),
-      modality: asString(architecture["modality"]),
+      modality,
+      outputModalities,
+      canOutputImage: detectsImageOutput(outputModalities, modality),
     });
   }
 
@@ -162,4 +205,35 @@ export async function getOpenRouterCatalog(
     });
 
   return inflight;
+}
+
+/**
+ * Synchronous capability probe against the warm cache.
+ *
+ * Returns `null` when no catalog has been fetched yet — callers must then fall
+ * back to their own heuristic instead of blocking the request path on a
+ * possibly unreachable openrouter.ai.
+ */
+export function cachedImageOutputCapability(modelId: string): boolean | null {
+  if (!cache) return null;
+  const hit = cache.models.find((m) => m.id === modelId);
+  return hit ? hit.canOutputImage : null;
+}
+
+/** Warm the catalog without making the caller wait (best effort). */
+export function warmCatalog(): void {
+  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) return;
+  if (inflight) return;
+  void getOpenRouterCatalog().catch(() => undefined);
+}
+
+/** Every catalog entry that can return images. Empty when the fetch fails. */
+export async function listImageOutputModels(): Promise<OpenRouterCatalogEntry[]> {
+  try {
+    const catalog = await getOpenRouterCatalog();
+    return catalog.models.filter((m) => m.canOutputImage);
+  } catch (err) {
+    logger.warn({ err }, "Image-capable catalog unavailable");
+    return [];
+  }
 }

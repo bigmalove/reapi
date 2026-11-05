@@ -16,6 +16,7 @@ import {
   OPENROUTER_ROUTING_SUFFIXES,
   hasModelVariantSuffix,
 } from "../lib/settings.js";
+import { cachedImageOutputCapability, warmCatalog } from "../lib/openrouterCatalog.js";
 
 /**
  * Upstream-channel gate for OpenRouter.
@@ -106,6 +107,20 @@ function isDeepSeekModel(modelId: string): boolean {
   return modelId.startsWith("deepseek/");
 }
 
+/**
+ * Heuristic used only when the catalog cache is cold. Every drawing model
+ * OpenRouter ships carries `image` in its slug (`google/gemini-3.1-flash-image`,
+ * `openai/gpt-5-image`, `gpt-image-2`, `nano-banana`). `openrouter/auto` is
+ * excluded on purpose: it *can* return images, but forcing image output on the
+ * router would hijack ordinary text traffic routed through it.
+ */
+const IMAGE_OUTPUT_ID = /(?:^|[-/])image(?:$|[-.:_])|nano-banana/i;
+
+export function looksLikeImageOutputModel(modelId: string): boolean {
+  if (modelId.startsWith("openrouter/auto")) return false;
+  return IMAGE_OUTPUT_ID.test(modelId);
+}
+
 export async function callOpenRouter(
   request: ChatCompletionRequest,
   clientHeaders: Record<string, string> = {},
@@ -186,6 +201,22 @@ export async function callOpenRouter(
   // models ended up burning the whole allowance before writing a first token.
   if (typeof body["max_tokens"] !== "number") {
     body["max_tokens"] = DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+
+  // Image output. OpenRouter only returns a picture from `chat/completions` when
+  // the request declares `modalities`; without it the very same model answers in
+  // text, which reads as "this gateway has no drawing model". Never override a
+  // client that already picked its own modality list.
+  if (body["modalities"] === undefined) {
+    const fromCatalog = cachedImageOutputCapability(actualModel);
+    if (fromCatalog === null) warmCatalog();
+    if (fromCatalog ?? looksLikeImageOutputModel(actualModel)) {
+      body["modalities"] = ["image", "text"];
+      logger.info(
+        { model: actualModel, source: fromCatalog === null ? "id-heuristic" : "catalog" },
+        "openrouter image output requested via modalities",
+      );
+    }
   }
 
   // Claude routing. `amazon-bedrock/claude-on-aws` is not a valid OpenRouter

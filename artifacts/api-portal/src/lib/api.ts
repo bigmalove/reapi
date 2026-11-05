@@ -114,6 +114,13 @@ export interface OpenRouterCatalogEntry {
   promptPrice: string | null;
   completionPrice: string | null;
   modality: string | null;
+  /** `architecture.output_modalities` from OpenRouter, e.g. `["image","text"]`. */
+  outputModalities: string[];
+  /**
+   * The model can return images (`output_modalities` contains `image`).
+   * `modality` alone is not enough: `text+image->text` only reads images.
+   */
+  canOutputImage: boolean;
   /** Already present in the gateway registry (built-in or previously added). */
   existing: boolean;
 }

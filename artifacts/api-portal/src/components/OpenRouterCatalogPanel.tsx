@@ -57,6 +57,10 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [hideExisting, setHideExisting] = useState(true);
+  // The catalog is 96% text-output models; without a filter the handful of
+  // drawing ones are impossible to find by eye (`openrouter/auto` does not even
+  // say "image" in its id).
+  const [imageOnly, setImageOnly] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState(false);
   // Also register -thinking / -thinking-{level} variants for every added model,
@@ -92,11 +96,19 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
     if (catalog === null) return [];
     const q = query.trim().toLowerCase();
     return catalog.data.filter((m) => {
-      if (hideExisting && m.existing) return false;
+      // Drawing models stay listed even when already registered — hiding them was
+      // exactly why the panel looked like OpenRouter shipped no image models.
+      if (hideExisting && m.existing && !m.canOutputImage) return false;
+      if (imageOnly && !m.canOutputImage) return false;
       if (!q) return true;
       return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q);
     });
-  }, [catalog, query, hideExisting]);
+  }, [catalog, query, hideExisting, imageOnly]);
+
+  const imageCapableCount = useMemo(
+    () => (catalog === null ? 0 : catalog.data.filter((m) => m.canOutputImage).length),
+    [catalog],
+  );
 
   const selectableVisible = useMemo(() => visible.filter((m) => !m.existing), [visible]);
 
@@ -180,7 +192,7 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
         </span>
         {catalog !== null && (
           <span className="ml-auto text-xs text-muted-foreground">
-            远程 {catalog.data.length} 个
+            远程 {catalog.data.length} 个 · 可出图 {imageCapableCount} 个
           </span>
         )}
       </button>
@@ -203,6 +215,18 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
               />
               隐藏已在列表中的
             </label>
+            <label
+              className="flex items-center gap-1.5 text-xs text-muted-foreground select-none"
+              title="只显示 output_modalities 含 image 的模型"
+            >
+              <input
+                type="checkbox"
+                checked={imageOnly}
+                onChange={(e) => setImageOnly(e.target.checked)}
+                className="size-3.5 accent-primary"
+              />
+              只看可出图
+            </label>
             <button
               onClick={() => void load(true)}
               disabled={loading}
@@ -213,11 +237,22 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
           </div>
 
           {catalog !== null && (
-            <p className="text-xs text-muted-foreground">
-              来源：{SOURCE_LABELS[catalog.source] ?? catalog.source} · 更新于{" "}
-              {new Date(catalog.fetched_at).toLocaleTimeString("zh-CN")} · 当前显示{" "}
-              {visible.length} 个
-            </p>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">
+                来源：{SOURCE_LABELS[catalog.source] ?? catalog.source} · 更新于{" "}
+                {new Date(catalog.fetched_at).toLocaleTimeString("zh-CN")} · 当前显示{" "}
+                {visible.length} 个
+              </p>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                OpenRouter 的 <code className="rounded bg-secondary/60 px-1">/models</code>{" "}
+                只列对话模型，纯绘图产品线（flux / ideogram / seedream / dall-e）不在其中；
+                能出图的只有 <code className="rounded bg-secondary/60 px-1">output_modalities</code>{" "}
+                含 <code className="rounded bg-secondary/60 px-1">image</code> 的对话模型，已用「可出图」标出，
+                勾选加入后网关会自动补 <code className="rounded bg-secondary/60 px-1">modalities: ["image","text"]</code>。
+                纯绘图 id 请走 <code className="rounded bg-secondary/60 px-1">/v1/images/generations</code>，
+                名单见 <code className="rounded bg-secondary/60 px-1">GET /v1/images/models</code>。
+              </p>
+            </div>
           )}
 
           {error !== "" && (
@@ -268,6 +303,11 @@ export default function OpenRouterCatalogPanel({ onAdded }: { onAdded: () => voi
                       </span>
                     </span>
                     <span className="shrink-0 text-right text-xs text-muted-foreground tabular-nums">
+                      {model.canOutputImage && (
+                        <span className="mb-0.5 block rounded border border-sky-500/30 bg-sky-500/10 px-1 py-0.5 text-[10px] leading-none text-sky-400">
+                          可出图
+                        </span>
+                      )}
                       {context !== null && <span className="block">{context} ctx</span>}
                       {promptPrice !== null && (
                         <span className="block">

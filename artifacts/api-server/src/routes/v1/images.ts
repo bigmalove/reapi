@@ -3,16 +3,36 @@ import { requireAuth } from "../../lib/auth.js";
 import { resolveProvider, isModelDisabled } from "../../lib/models.js";
 import { resolveProviderEndpoint, asUpstreamUnavailableError, type ProviderEndpoint } from "../../lib/providerEndpoint.js";
 import { maybeDisableSelectedNode } from "../../lib/upstreamNodeFailure.js";
+import { listImageOutputModels } from "../../lib/openrouterCatalog.js";
 import type { ImageGenerationRequest, ImageGenerationResponse } from "../../types.js";
 
 const router = Router();
 
-// Models that support image generation via OpenRouter
+// Pure image vendors (seedream, gpt-image, …) are NOT chat models, so OpenRouter
+// never lists them in `/models`; these ids have to be pinned by hand. Everything
+// else that can draw is discovered through the catalog's `output_modalities`
+// (see `listImageOutputModels`).
 const IMAGE_MODELS = new Set([
   "openai/gpt-image-2",
   "openai/gpt-5.4-image-2",
   "bytedance-seed/seedream-4.5",
 ]);
+
+/**
+ * Image-capable models this gateway knows about: the pinned vendor ids plus every
+ * catalog entry whose output modality includes `image`. Catalog failures degrade
+ * to the pinned set instead of breaking the endpoint.
+ */
+router.get("/v1/images/models", requireAuth, async (_req: Request, res: Response) => {
+  const catalog = await listImageOutputModels();
+  const data = [
+    ...Array.from(IMAGE_MODELS).map((id) => ({ id, source: "pinned" as const })),
+    ...catalog
+      .filter((m) => !IMAGE_MODELS.has(m.id))
+      .map((m) => ({ id: m.id, source: "catalog" as const, outputModalities: m.outputModalities })),
+  ];
+  res.json({ object: "list", data });
+});
 
 router.post("/v1/images/generations", requireAuth, async (req: Request, res: Response) => {
   res.setTimeout(300_000);
@@ -37,8 +57,19 @@ router.post("/v1/images/generations", requireAuth, async (req: Request, res: Res
 
   const provider = resolveProvider(body.model);
   if (provider !== "openrouter" && !IMAGE_MODELS.has(body.model)) {
-    res.status(400).json({ error: { message: `Model ${body.model} does not support image generation` } });
-    return;
+    // Not a registered OpenRouter model and not pinned: only a catalog card that
+    // declares image output can still be served. Only reached on that slow path,
+    // so the extra catalog lookup is not on the hot path.
+    const catalogIds = new Set((await listImageOutputModels()).map((m) => m.id));
+    if (!catalogIds.has(body.model)) {
+      res.status(400).json({
+        error: {
+          message: `Model ${body.model} does not support image generation (see GET /v1/images/models for the list)`,
+          type: "invalid_request",
+        },
+      });
+      return;
+    }
   }
 
   let endpoint: ProviderEndpoint;
