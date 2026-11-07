@@ -157,6 +157,36 @@ export function detectBudgetExceeded(body: string): { code: string; message: str
 }
 
 /**
+ * Detect an upstream credential refusal — the node's own Replit app credential
+ * was rejected, not the caller's request.
+ *
+ * Replit's modelfarm edge (Apigee) answers a node whose AI credential is no
+ * longer approved with a fault envelope instead of an OpenAI-style error:
+ *   {"fault":{"faultstring":"ApiKey not approved",
+ *             "detail":{"errorcode":"oauth.v2.ApiKeyNotApproved"}}}
+ * A 401 of that shape arrives for every request routed to that node, forever:
+ * nothing about the request is wrong, the account has to be re-authorized. It
+ * therefore belongs to the same family as a 403 FREE_TIER_BUDGET_EXCEEDED —
+ * the node leaves the pool and the request is replayed elsewhere.
+ *
+ * Matched on the body, not the status alone: the gateway itself answers
+ * `401 {"error":{"message":"Unauthorized","type":"auth_error"}}` for a bad
+ * caller key, and a body-blind 401 rule would evict a healthy node for any
+ * caller that forgot its Authorization header.
+ */
+export function detectCredentialRejected(body: string): string | null {
+  if (!body) return null;
+  const apigeeCode = /"errorcode"\s*:\s*"(oauth\.v2\.[A-Za-z0-9_.]+)"/.exec(body)?.[1];
+  const faultString = /"faultstring"\s*:\s*"([^"]{1,200})"/.exec(body)?.[1];
+  const matched =
+    apigeeCode !== undefined ||
+    /apikey\s+not\s+approved|api\s*key\s+not\s+approved|invalid\s+api\s*key|incorrect\s+api\s*key/i.test(body);
+  if (!matched) return null;
+  const code = apigeeCode ?? "apikey_not_approved";
+  return faultString ? `${code}: ${faultString}` : code;
+}
+
+/**
  * How many *separate requests* a single node may fail with 429 inside the
  * strike window before the account is treated as spent.
  *
@@ -475,6 +505,34 @@ function applyNodeFailure(args: {
       upstreamReason: "payment_required",
       upstreamStatus: 402,
       lastError,
+      rawUpstreamBody: responseBody,
+    });
+    return;
+  }
+
+  // 401 with an upstream fault envelope = this node's own AI credential is not
+  // approved any more (measured 2026-11-06: one of twelve pooled dev nodes
+  // answered `oauth.v2.ApiKeyNotApproved` for every request). Left alone, that
+  // node never leaves round-robin and the error reaches the caller as a raw
+  // 401 once every twelve requests — see `detectCredentialRejected`. Park it
+  // and let the retry land on a healthy account.
+  const rejectedCredential = responseStatus === 401 ? detectCredentialRejected(responseBody) : null;
+  if (rejectedCredential) {
+    logger.warn(
+      {
+        nodeUrl: endpoint.nodeUrl,
+        upstreamStatus: responseStatus,
+        upstreamReason: rejectedCredential,
+        message: responseBody.slice(0, 300),
+      },
+      "upstream node credential rejected — removing node from pool",
+    );
+    disableUpstreamNode({
+      url: endpoint.nodeUrl,
+      disabledReason: "requires-wakeup",
+      upstreamReason: "requires-wakeup",
+      upstreamStatus: responseStatus,
+      lastError: `dev LLM probe HTTP ${responseStatus}: ${responseBody.slice(0, 300)}`,
       rawUpstreamBody: responseBody,
     });
     return;

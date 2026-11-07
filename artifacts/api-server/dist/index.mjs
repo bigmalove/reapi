@@ -38704,6 +38704,15 @@ function detectBudgetExceeded(body) {
     message: extractErrorMessage(body) ?? body.slice(0, 300)
   };
 }
+function detectCredentialRejected(body) {
+  if (!body) return null;
+  const apigeeCode = /"errorcode"\s*:\s*"(oauth\.v2\.[A-Za-z0-9_.]+)"/.exec(body)?.[1];
+  const faultString = /"faultstring"\s*:\s*"([^"]{1,200})"/.exec(body)?.[1];
+  const matched = apigeeCode !== void 0 || /apikey\s+not\s+approved|api\s*key\s+not\s+approved|invalid\s+api\s*key|incorrect\s+api\s*key/i.test(body);
+  if (!matched) return null;
+  const code = apigeeCode ?? "apikey_not_approved";
+  return faultString ? `${code}: ${faultString}` : code;
+}
 var QUOTA_STRIKE_LIMIT = 8;
 var QUOTA_STRIKE_WINDOW_MS = 10 * 60 * 1e3;
 var quotaStrikes = /* @__PURE__ */ new Map();
@@ -38858,6 +38867,27 @@ function applyNodeFailure(args) {
       upstreamReason: "payment_required",
       upstreamStatus: 402,
       lastError,
+      rawUpstreamBody: responseBody
+    });
+    return;
+  }
+  const rejectedCredential = responseStatus === 401 ? detectCredentialRejected(responseBody) : null;
+  if (rejectedCredential) {
+    logger.warn(
+      {
+        nodeUrl: endpoint.nodeUrl,
+        upstreamStatus: responseStatus,
+        upstreamReason: rejectedCredential,
+        message: responseBody.slice(0, 300)
+      },
+      "upstream node credential rejected \u2014 removing node from pool"
+    );
+    disableUpstreamNode({
+      url: endpoint.nodeUrl,
+      disabledReason: "requires-wakeup",
+      upstreamReason: "requires-wakeup",
+      upstreamStatus: responseStatus,
+      lastError: `dev LLM probe HTTP ${responseStatus}: ${responseBody.slice(0, 300)}`,
       rawUpstreamBody: responseBody
     });
     return;
@@ -44394,8 +44424,8 @@ router12.get("/v1/videos/generations/:id", requireAuth, async (req, res) => {
 var videos_default = router12;
 
 // artifacts/api-server/src/lib/buildInfo.ts
-var BUILD_COMMIT = true ? "1620fa2" : "dev";
-var BUILD_TIME = true ? "2026-11-05T04:09:20.533Z" : "dev";
+var BUILD_COMMIT = true ? "31c79f6" : "dev";
+var BUILD_TIME = true ? "2026-11-07T01:44:13.921Z" : "dev";
 
 // artifacts/api-server/src/app.ts
 var app = (0, import_express13.default)();
