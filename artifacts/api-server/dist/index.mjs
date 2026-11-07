@@ -44424,8 +44424,8 @@ router12.get("/v1/videos/generations/:id", requireAuth, async (req, res) => {
 var videos_default = router12;
 
 // artifacts/api-server/src/lib/buildInfo.ts
-var BUILD_COMMIT = true ? "31c79f6" : "dev";
-var BUILD_TIME = true ? "2026-11-07T01:44:13.921Z" : "dev";
+var BUILD_COMMIT = true ? "09bc659" : "dev";
+var BUILD_TIME = true ? "2026-11-07T01:48:05.879Z" : "dev";
 
 // artifacts/api-server/src/app.ts
 var app = (0, import_express13.default)();
